@@ -1,11 +1,13 @@
 import asyncio
+import html
 import os
 import re
-import subprocess
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import unquote
 
+import requests
 import yt_dlp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
@@ -56,9 +58,10 @@ def download_video(url, folder):
         "noplaylist": True,
         "http_headers": {
             "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 "
-                "like Mac OS X) AppleWebKit/605.1.15 "
-                "Version/17.0 Mobile/15E148 Safari/604.1"
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) "
+                "AppleWebKit/605.1.15 "
+                "(KHTML, like Gecko) Version/17.0 "
+                "Mobile/15E148 Safari/604.1"
             ),
             "Referer": "https://www.instagram.com/",
         },
@@ -74,49 +77,157 @@ def download_video(url, folder):
     return None
 
 
-def download_images(url, folder):
-    """
-    Instagram photo/carousel учун gallery-dl ишлатади.
-    """
-    command = [
-        "gallery-dl",
-        "--directory",
-        folder,
-        "--no-mtime",
-        url,
-    ]
+def clean_url(raw):
+    try:
+        value = raw.replace("\\/", "/")
+        value = value.replace("\\u0026", "&")
+        value = value.replace("\\u003D", "=")
+        value = value.replace("\\u0025", "%")
+        value = html.unescape(value)
+        value = unquote(value)
+        return value
+    except Exception:
+        return raw
 
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=120,
+
+def get_instagram_images(url, folder):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) "
+            "AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.0 "
+            "Mobile/15E148 Safari/604.1"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.instagram.com/",
+    }
+
+    session = requests.Session()
+    response = session.get(
+        url,
+        headers=headers,
+        timeout=30,
+        allow_redirects=True,
     )
 
-    print("gallery-dl stdout:", result.stdout)
-    print("gallery-dl stderr:", result.stderr)
+    response.raise_for_status()
 
-    files = []
+    page = response.text
 
-    for root, dirs, filenames in os.walk(folder):
-        for filename in filenames:
-            path = os.path.join(root, filename)
+    print("Instagram status:", response.status_code)
+    print("Instagram URL:", response.url)
+    print("HTML size:", len(page))
 
-            if filename.lower().endswith(
-                (".jpg", ".jpeg", ".png", ".webp")
+    image_urls = []
+
+    # Асосий carousel расмлар
+    patterns = [
+        r'"display_url"\s*:\s*"([^"]+)"',
+        r'"thumbnail_src"\s*:\s*"([^"]+)"',
+        r'"image_versions2"\s*:\s*\{.*?"url"\s*:\s*"([^"]+)"',
+    ]
+
+    for pattern in patterns:
+        matches = re.findall(pattern, page, flags=re.DOTALL)
+
+        for raw in matches:
+            image_url = clean_url(raw)
+
+            if (
+                image_url.startswith("http")
+                and (
+                    "scontent" in image_url
+                    or "cdninstagram" in image_url
+                    or ".jpg" in image_url
+                    or ".jpeg" in image_url
+                    or ".png" in image_url
+                    or ".webp" in image_url
+                )
             ):
-                files.append(path)
+                if image_url not in image_urls:
+                    image_urls.append(image_url)
 
-    return sorted(files)
+    # OpenGraph биринчи расм учун fallback
+    og_matches = re.findall(
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        page,
+        flags=re.IGNORECASE,
+    )
+
+    for raw in og_matches:
+        image_url = clean_url(raw)
+
+        if image_url.startswith("http") and image_url not in image_urls:
+            image_urls.append(image_url)
+
+    # Дубликатларни олиб ташлаш
+    unique_urls = []
+
+    for item in image_urls:
+        base = item.split("?")[0]
+
+        if base not in [
+            x.split("?")[0]
+            for x in unique_urls
+        ]:
+            unique_urls.append(item)
+
+    print("Found image URLs:", len(unique_urls))
+
+    downloaded = []
+
+    for index, image_url in enumerate(unique_urls, start=1):
+        try:
+            image_response = session.get(
+                image_url,
+                headers=headers,
+                timeout=30,
+            )
+
+            image_response.raise_for_status()
+
+            content_type = image_response.headers.get(
+                "Content-Type",
+                ""
+            ).lower()
+
+            if "image" not in content_type:
+                continue
+
+            extension = ".jpg"
+
+            if "png" in content_type:
+                extension = ".png"
+            elif "webp" in content_type:
+                extension = ".webp"
+            elif "jpeg" in content_type:
+                extension = ".jpg"
+
+            filename = os.path.join(
+                folder,
+                f"image_{index}{extension}"
+            )
+
+            with open(filename, "wb") as file:
+                file.write(image_response.content)
+
+            downloaded.append(filename)
+
+        except Exception as error:
+            print(
+                f"Image {index} error:",
+                error
+            )
+
+    return downloaded
 
 
 def download_media(url, folder):
-    """
-    Аввал video/Reel сифатида олишга ҳаракат қилади.
-    Агар video формат топилмаса, gallery-dl орқали
-    photo/carousel сифатида олади.
-    """
-
+    # 1. Аввало видео
     try:
         video = download_video(url, folder)
 
@@ -126,15 +237,18 @@ def download_media(url, folder):
     except Exception as error:
         print("yt-dlp:", error)
 
-    # Видео эмас — photo/carousel бўлиши мумкин
+    # 2. Агар видео бўлмаса — расм
     try:
-        images = download_images(url, folder)
+        images = get_instagram_images(
+            url,
+            folder
+        )
 
         if images:
             return images
 
     except Exception as error:
-        print("gallery-dl:", error)
+        print("Instagram image parser:", error)
 
     return []
 
@@ -157,15 +271,16 @@ async def get_media(message: types.Message):
 
     if not is_instagram_url(url):
         await message.answer(
-            "❌ Instagram ссылкаси юборинг.\n\n"
-            "Масалан:\n"
-            "https://www.instagram.com/reel/..."
+            "❌ Instagram ссылкаси юборинг."
         )
         return
 
-    status = await message.answer("⏳ Юкланяпти...")
+    status = await message.answer(
+        "⏳ Юкланяпти..."
+    )
 
     with tempfile.TemporaryDirectory() as folder:
+
         try:
             media_files = await asyncio.to_thread(
                 download_media,
@@ -185,7 +300,10 @@ async def get_media(message: types.Message):
             )
 
             for media in media_files:
-                extension = os.path.splitext(media)[1].lower()
+
+                extension = os.path.splitext(
+                    media
+                )[1].lower()
 
                 if extension in (
                     ".jpg",
@@ -204,6 +322,7 @@ async def get_media(message: types.Message):
             await status.delete()
 
         except Exception as error:
+
             print("ERROR:", error)
 
             await status.edit_text(
@@ -212,7 +331,10 @@ async def get_media(message: types.Message):
 
 
 async def main():
-    bot = Bot(token=BOT_TOKEN)
+
+    bot = Bot(
+        token=BOT_TOKEN
+    )
 
     threading.Thread(
         target=start_server,
