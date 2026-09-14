@@ -19,10 +19,6 @@ from aiogram.types import (
 )
 
 
-# ==========================================
-# BOT TOKEN
-# ==========================================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
@@ -33,7 +29,7 @@ dp = Dispatcher()
 
 
 # ==========================================
-# RENDER HEALTH SERVER
+# RENDER SERVER
 # ==========================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -62,7 +58,7 @@ def start_server():
 
 
 # ==========================================
-# INSTAGRAM LINK
+# INSTAGRAM URL
 # ==========================================
 
 def is_instagram_url(text):
@@ -73,8 +69,16 @@ def is_instagram_url(text):
     )
 
 
+def is_reel_url(url):
+
+    return re.search(
+        r"instagram\.com/(reel|reels)/",
+        url
+    )
+
+
 # ==========================================
-# REEL / VIDEO YUKLASH
+# VIDEO DOWNLOAD
 # ==========================================
 
 def download_video(url, folder):
@@ -98,19 +102,25 @@ def download_video(url, folder):
 
         "noplaylist": True,
 
+        "impersonate": "chrome",
+
         "http_headers": {
 
             "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) "
-                "AppleWebKit/605.1.15 "
-                "(KHTML, like Gecko) Version/17.0 "
-                "Mobile/15E148 Safari/604.1"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/140.0.0.0 Safari/537.36"
             ),
+
+            "Accept-Language":
+                "en-US,en;q=0.9",
 
             "Referer":
                 "https://www.instagram.com/",
         },
     }
+
+    print("🎥 Video yuklanmoqda...")
 
     with yt_dlp.YoutubeDL(options) as ydl:
 
@@ -131,7 +141,7 @@ def download_video(url, folder):
 
 
 # ==========================================
-# URL TOZALASH
+# URL CLEAN
 # ==========================================
 
 def clean_url(raw):
@@ -174,18 +184,17 @@ def clean_url(raw):
 
 
 # ==========================================
-# INSTAGRAM RASMLARINI TOPISH
+# INSTAGRAM PAGE
 # ==========================================
 
-def get_instagram_images(url, folder):
+def get_instagram_page(url):
 
     headers = {
 
         "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) "
-            "AppleWebKit/605.1.15 "
-            "(KHTML, like Gecko) Version/17.0 "
-            "Mobile/15E148 Safari/604.1"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/140.0.0.0 Safari/537.36"
         ),
 
         "Accept": (
@@ -201,9 +210,7 @@ def get_instagram_images(url, folder):
             "https://www.instagram.com/",
     }
 
-
     session = requests.Session()
-
 
     response = session.get(
 
@@ -216,12 +223,7 @@ def get_instagram_images(url, folder):
         allow_redirects=True
     )
 
-
     response.raise_for_status()
-
-
-    page = response.text
-
 
     print(
         "Instagram status:",
@@ -235,14 +237,28 @@ def get_instagram_images(url, folder):
 
     print(
         "HTML size:",
-        len(page)
+        len(response.text)
     )
 
+    return response.text, session, headers
+
+
+# ==========================================
+# RASM TOPISH
+# ==========================================
+
+def get_instagram_images(
+    url,
+    folder
+):
+
+    page, session, headers = (
+        get_instagram_page(url)
+    )
 
     image_urls = []
 
 
-    # Instagram carousel rasmlari
     patterns = [
 
         r'"display_url"\s*:\s*"([^"]+)"',
@@ -273,8 +289,11 @@ def get_instagram_images(url, folder):
 
 
             if (
+
                 image_url.startswith("http")
+
                 and
+
                 (
                     "scontent" in image_url
                     or
@@ -288,6 +307,7 @@ def get_instagram_images(url, folder):
                     or
                     ".webp" in image_url
                 )
+
             ):
 
                 if image_url not in image_urls:
@@ -297,7 +317,7 @@ def get_instagram_images(url, folder):
                     )
 
 
-    # OpenGraph fallback
+    # OpenGraph
     og_matches = re.findall(
 
         r'<meta[^>]+property=["\']og:image["\']'
@@ -317,9 +337,13 @@ def get_instagram_images(url, folder):
 
 
         if (
+
             image_url.startswith("http")
+
             and
+
             image_url not in image_urls
+
         ):
 
             image_urls.append(
@@ -327,10 +351,7 @@ def get_instagram_images(url, folder):
             )
 
 
-    # ==========================================
-    # DUBLIKATLARNI OLIB TASHLASH
-    # ==========================================
-
+    # Duplicates
     unique_urls = []
 
     seen = set()
@@ -351,17 +372,13 @@ def get_instagram_images(url, folder):
 
 
     print(
-        "Found image URLs:",
+        "📸 Found image URLs:",
         len(unique_urls)
     )
 
 
     downloaded = []
 
-
-    # ==========================================
-    # RASMLARNI YUKLASH
-    # ==========================================
 
     for index, image_url in enumerate(
 
@@ -380,7 +397,6 @@ def get_instagram_images(url, folder):
 
                 timeout=30
             )
-
 
             image_response.raise_for_status()
 
@@ -452,22 +468,20 @@ def get_instagram_images(url, folder):
 
 
 # ==========================================
-# MEDIA YUKLASH
+# MEDIA
 # ==========================================
 
-def download_media(url, folder):
+def download_media(
+    url,
+    folder
+):
 
     # ======================================
-    # REEL / REELS
+    # REEL
     # FAQAT VIDEO
     # ======================================
 
-    if re.search(
-
-        r"instagram\.com/(reel|reels)/",
-
-        url
-    ):
+    if is_reel_url(url):
 
         try:
 
@@ -487,13 +501,11 @@ def download_media(url, folder):
         except Exception as error:
 
             print(
-                "Reel yt-dlp error:",
+                "❌ Reel video error:",
                 error
             )
 
 
-        # Reel video topilmasa
-        # cover rasmini yubormaymiz
         return []
 
 
@@ -520,7 +532,7 @@ def download_media(url, folder):
     except Exception as error:
 
         print(
-            "Post yt-dlp error:",
+            "Post video error:",
             error
         )
 
@@ -556,7 +568,7 @@ def download_media(url, folder):
 
 
 # ==========================================
-# /START
+# START
 # ==========================================
 
 @dp.message(CommandStart())
@@ -572,19 +584,18 @@ async def start(
 
         "🎥 Видео\n"
         "📸 Расм\n"
-        "🖼 Бир нечта расмли Post\n\n"
+        "🖼 Carousel\n\n"
 
         "ҳаммасини юклаб бераман."
     )
 
 
 # ==========================================
-# INSTAGRAM MESSAGE
+# MESSAGE
 # ==========================================
 
 @dp.message()
 async def get_media(
-
     message: types.Message
 ):
 
@@ -592,10 +603,6 @@ async def get_media(
         message.text or ""
     ).strip()
 
-
-    # ======================================
-    # LINK TEKSHIRISH
-    # ======================================
 
     if not is_instagram_url(url):
 
@@ -613,10 +620,6 @@ async def get_media(
     )
 
 
-    # ======================================
-    # TEMPORARY FOLDER
-    # ======================================
-
     with tempfile.TemporaryDirectory() as folder:
 
         try:
@@ -630,10 +633,6 @@ async def get_media(
                 folder
             )
 
-
-            # ==================================
-            # MEDIA TOPILMADI
-            # ==================================
 
             if not media_files:
 
@@ -654,7 +653,7 @@ async def get_media(
 
 
             # ==================================
-            # BITTA MEDIA
+            # BITTA FILE
             # ==================================
 
             if len(media_files) == 1:
@@ -671,7 +670,6 @@ async def get_media(
                 )
 
 
-                # RASM
                 if extension in (
 
                     ".jpg",
@@ -688,8 +686,6 @@ async def get_media(
                         )
                     )
 
-
-                # VIDEO
                 else:
 
                     await message.answer_video(
@@ -701,8 +697,7 @@ async def get_media(
 
 
             # ==================================
-            # CAROUSEL
-            # BITTA ALBUM
+            # CAROUSEL ALBUM
             # ==================================
 
             else:
@@ -721,7 +716,6 @@ async def get_media(
                     )
 
 
-                    # RASM
                     if extension in (
 
                         ".jpg",
@@ -741,8 +735,6 @@ async def get_media(
                             )
                         )
 
-
-                    # VIDEO
                     else:
 
                         media_group.append(
@@ -756,10 +748,7 @@ async def get_media(
                         )
 
 
-                # ==================================
-                # TELEGRAM ALBUM MAX 10 TA
-                # ==================================
-
+                # Telegram 10 ta limit
                 for i in range(
 
                     0,
@@ -781,17 +770,13 @@ async def get_media(
                     )
 
 
-            # ==================================
-            # STATUSNI OCHIRISH
-            # ==================================
-
             await status.delete()
 
 
         except Exception as error:
 
             print(
-                "ERROR:",
+                "❌ ERROR:",
                 error
             )
 
@@ -819,7 +804,6 @@ async def main():
     )
 
 
-    # Render server
     threading.Thread(
 
         target=start_server,
@@ -840,7 +824,7 @@ async def main():
 
 
 # ==========================================
-# START BOT
+# START
 # ==========================================
 
 if __name__ == "__main__":
