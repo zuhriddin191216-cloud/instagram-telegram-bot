@@ -52,17 +52,63 @@ def download_media(url, folder):
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
-        "noplaylist": True,
+        "noplaylist": False,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 "
+                "like Mac OS X) AppleWebKit/605.1.15 "
+                "Version/17.0 Mobile/15E148 Safari/604.1"
+            ),
+            "Referer": "https://www.instagram.com/",
+        },
     }
 
     with yt_dlp.YoutubeDL(options) as ydl:
-        ydl.download([url])
+        info = ydl.extract_info(url, download=True)
+
+    files = []
 
     for filename in os.listdir(folder):
         if filename.startswith("media."):
-            return os.path.join(folder, filename)
+            files.append(os.path.join(folder, filename))
 
-    return None
+    if files:
+        return files
+
+    # Агар постда видео формати топилмаса,
+    # расм URL'ларини олишга ҳаракат қиламиз.
+    entries = info.get("entries") if isinstance(info, dict) else None
+
+    if entries:
+        for entry in entries:
+            if not entry:
+                continue
+
+            image_url = entry.get("url")
+
+            if image_url and entry.get("ext") in (
+                "jpg", "jpeg", "png", "webp"
+            ):
+                try:
+                    image_path = os.path.join(
+                        folder,
+                        f"media_{len(files)}.{entry.get('ext')}"
+                    )
+
+                    ydl.download([image_url])
+                    
+                    downloaded = [
+                        os.path.join(folder, f)
+                        for f in os.listdir(folder)
+                        if f.startswith("media_")
+                    ]
+
+                    files.extend(downloaded)
+
+                except Exception:
+                    pass
+
+    return files
 
 
 @dp.message(CommandStart())
@@ -90,13 +136,13 @@ async def get_media(message: types.Message):
 
     with tempfile.TemporaryDirectory() as folder:
         try:
-            media = await asyncio.to_thread(
+            media_files = await asyncio.to_thread(
                 download_media,
                 url,
                 folder
             )
 
-            if not media:
+            if not media_files:
                 await status.edit_text(
                     "❌ Медиафайлни топа олмадим."
                 )
@@ -106,18 +152,17 @@ async def get_media(message: types.Message):
                 "📤 Telegram'га юбориляпти..."
             )
 
-            extension = os.path.splitext(media)[1].lower()
+            for media in media_files:
+                extension = os.path.splitext(media)[1].lower()
 
-            if extension in [".jpg", ".jpeg", ".png", ".webp"]:
-                await message.answer_photo(
-                    photo=FSInputFile(media),
-                    caption="✅ Тайёр!"
-                )
-            else:
-                await message.answer_video(
-                    video=FSInputFile(media),
-                    caption="✅ Тайёр!"
-                )
+                if extension in [".jpg", ".jpeg", ".png", ".webp"]:
+                    await message.answer_photo(
+                        photo=FSInputFile(media)
+                    )
+                else:
+                    await message.answer_video(
+                        video=FSInputFile(media)
+                    )
 
             await status.delete()
 
@@ -125,9 +170,7 @@ async def get_media(message: types.Message):
             print("ERROR:", error)
 
             await status.edit_text(
-                "❌ Юклашда хатолик бўлди.\n\n"
-                "Instagram аккаунти ёпиқ бўлиши ёки "
-                "файл Telegram лимитидан катта бўлиши мумкин."
+                "❌ Юклашда хатолик бўлди."
             )
 
 
