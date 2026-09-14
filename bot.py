@@ -20,7 +20,6 @@ if not BOT_TOKEN:
 dp = Dispatcher()
 
 
-# Render serveri uxlab qolmasligi va port ochiq bo‘lishi uchun
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -44,8 +43,8 @@ def is_instagram_url(text):
     )
 
 
-def download_video(url, folder):
-    output = os.path.join(folder, "video.%(ext)s")
+def download_media(url, folder):
+    output = os.path.join(folder, "media.%(ext)s")
 
     options = {
         "outtmpl": output,
@@ -60,7 +59,7 @@ def download_video(url, folder):
         ydl.download([url])
 
     for filename in os.listdir(folder):
-        if filename.startswith("video."):
+        if filename.startswith("media."):
             return os.path.join(folder, filename)
 
     return None
@@ -71,12 +70,12 @@ async def start(message: types.Message):
     await message.answer(
         "👋 Салом!\n\n"
         "Instagram Reel ёки Post ссылкасини юборинг.\n"
-        "Мен видеони юклаб, сизга юбориб бераман 🎥"
+        "Мен видео ёки расмни юклаб, сизга юбориб бераман 🎥📸"
     )
 
 
 @dp.message()
-async def get_video(message: types.Message):
+async def get_media(message: types.Message):
     url = (message.text or "").strip()
 
     if not is_instagram_url(url):
@@ -87,28 +86,38 @@ async def get_video(message: types.Message):
         )
         return
 
-    status = await message.answer("⏳ Видео юкланяпти...")
+    status = await message.answer("⏳ Юкланяпти...")
 
     with tempfile.TemporaryDirectory() as folder:
         try:
-            video = await asyncio.to_thread(
-                download_video,
+            media = await asyncio.to_thread(
+                download_media,
                 url,
                 folder
             )
 
-            if not video:
+            if not media:
                 await status.edit_text(
-                    "❌ Видеони топа олмадим."
+                    "❌ Медиафайлни топа олмадим."
                 )
                 return
 
-            await status.edit_text("📤 Видео Telegram'га юбориляпти...")
-
-            await message.answer_video(
-                video=FSInputFile(video),
-                caption="✅ Тайёр!"
+            await status.edit_text(
+                "📤 Telegram'га юбориляпти..."
             )
+
+            extension = os.path.splitext(media)[1].lower()
+
+            if extension in [".jpg", ".jpeg", ".png", ".webp"]:
+                await message.answer_photo(
+                    photo=FSInputFile(media),
+                    caption="✅ Тайёр!"
+                )
+            else:
+                await message.answer_video(
+                    video=FSInputFile(media),
+                    caption="✅ Тайёр!"
+                )
 
             await status.delete()
 
@@ -116,9 +125,9 @@ async def get_video(message: types.Message):
             print("ERROR:", error)
 
             await status.edit_text(
-                "❌ Видеони юклашда хатолик бўлди.\n\n"
-                "Instagram аккаунти ёпиқ бўлиши ёки видео "
-                "Telegram лимитидан катта бўлиши мумкин."
+                "❌ Юклашда хатолик бўлди.\n\n"
+                "Instagram аккаунти ёпиқ бўлиши ёки "
+                "файл Telegram лимитидан катта бўлиши мумкин."
             )
 
 
