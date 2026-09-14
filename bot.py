@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import subprocess
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -43,8 +44,8 @@ def is_instagram_url(text):
     )
 
 
-def download_media(url, folder):
-    output = os.path.join(folder, "media.%(ext)s")
+def download_video(url, folder):
+    output = os.path.join(folder, "video.%(ext)s")
 
     options = {
         "outtmpl": output,
@@ -52,7 +53,7 @@ def download_media(url, folder):
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
-        "noplaylist": False,
+        "noplaylist": True,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 "
@@ -64,59 +65,89 @@ def download_media(url, folder):
     }
 
     with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=True)
+        ydl.download([url])
+
+    for filename in os.listdir(folder):
+        if filename.startswith("video."):
+            return os.path.join(folder, filename)
+
+    return None
+
+
+def download_images(url, folder):
+    """
+    Instagram photo/carousel учун gallery-dl ишлатади.
+    """
+    command = [
+        "gallery-dl",
+        "--directory",
+        folder,
+        "--no-mtime",
+        url,
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    print("gallery-dl stdout:", result.stdout)
+    print("gallery-dl stderr:", result.stderr)
 
     files = []
 
-    for filename in os.listdir(folder):
-        if filename.startswith("media."):
-            files.append(os.path.join(folder, filename))
+    for root, dirs, filenames in os.walk(folder):
+        for filename in filenames:
+            path = os.path.join(root, filename)
 
-    if files:
-        return files
-
-    # Агар постда видео формати топилмаса,
-    # расм URL'ларини олишга ҳаракат қиламиз.
-    entries = info.get("entries") if isinstance(info, dict) else None
-
-    if entries:
-        for entry in entries:
-            if not entry:
-                continue
-
-            image_url = entry.get("url")
-
-            if image_url and entry.get("ext") in (
-                "jpg", "jpeg", "png", "webp"
+            if filename.lower().endswith(
+                (".jpg", ".jpeg", ".png", ".webp")
             ):
-                try:
-                    image_path = os.path.join(
-                        folder,
-                        f"media_{len(files)}.{entry.get('ext')}"
-                    )
+                files.append(path)
 
-                    ydl.download([image_url])
-                    
-                    downloaded = [
-                        os.path.join(folder, f)
-                        for f in os.listdir(folder)
-                        if f.startswith("media_")
-                    ]
+    return sorted(files)
 
-                    files.extend(downloaded)
 
-                except Exception:
-                    pass
+def download_media(url, folder):
+    """
+    Аввал video/Reel сифатида олишга ҳаракат қилади.
+    Агар video формат топилмаса, gallery-dl орқали
+    photo/carousel сифатида олади.
+    """
 
-    return files
+    try:
+        video = download_video(url, folder)
+
+        if video:
+            return [video]
+
+    except Exception as error:
+        print("yt-dlp:", error)
+
+    # Видео эмас — photo/carousel бўлиши мумкин
+    try:
+        images = download_images(url, folder)
+
+        if images:
+            return images
+
+    except Exception as error:
+        print("gallery-dl:", error)
+
+    return []
 
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
     await message.answer(
         "👋 Салом!\n\n"
-        "Instagram Reel ёки Post ссылкасини юборинг.\n"
-        "Мен видео ёки расмни юклаб, сизга юбориб бераман 🎥📸"
+        "Instagram Reel ёки Post ссылкасини юборинг.\n\n"
+        "🎥 Видео\n"
+        "📸 Расм\n"
+        "🖼 Бир нечта расмли Post\n\n"
+        "ҳаммасини юклаб бераман."
     )
 
 
@@ -144,7 +175,8 @@ async def get_media(message: types.Message):
 
             if not media_files:
                 await status.edit_text(
-                    "❌ Медиафайлни топа олмадим."
+                    "❌ Медиафайлни топа олмадим.\n\n"
+                    "Instagram Post очиқ бўлиши керак."
                 )
                 return
 
@@ -155,7 +187,12 @@ async def get_media(message: types.Message):
             for media in media_files:
                 extension = os.path.splitext(media)[1].lower()
 
-                if extension in [".jpg", ".jpeg", ".png", ".webp"]:
+                if extension in (
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".webp"
+                ):
                     await message.answer_photo(
                         photo=FSInputFile(media)
                     )
