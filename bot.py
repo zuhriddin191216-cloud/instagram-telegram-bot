@@ -2,6 +2,7 @@ import asyncio
 import html
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import traceback
@@ -22,7 +23,7 @@ from aiogram.types import (
 
 
 # =========================================================
-# SETTINGS
+# BOT TOKEN
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -30,17 +31,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN topilmadi")
 
+
 dp = Dispatcher()
 
 
 # =========================================================
-# RENDER WEB SERVER
+# RENDER HEALTH SERVER
 # =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-
         self.send_response(200)
 
         self.send_header(
@@ -68,10 +69,7 @@ def start_server():
     )
 
     server = HTTPServer(
-        (
-            "0.0.0.0",
-            port
-        ),
+        ("0.0.0.0", port),
         HealthHandler
     )
 
@@ -128,20 +126,18 @@ def get_shortcode(url):
         parsed = urlparse(url)
 
         parts = [
-            x for x in parsed.path.split("/")
+            x
+            for x in parsed.path.split("/")
             if x
         ]
 
-        if len(parts) >= 2:
+        if (
+            len(parts) >= 2
+            and parts[0].lower()
+            in ("p", "reel", "reels", "tv")
+        ):
 
-            if parts[0].lower() in (
-                "p",
-                "reel",
-                "reels",
-                "tv"
-            ):
-
-                return parts[1]
+            return parts[1]
 
     except Exception as error:
 
@@ -155,7 +151,7 @@ def get_shortcode(url):
 
 
 # =========================================================
-# URL CLEAN
+# CLEAN URL
 # =========================================================
 
 def clean_url(raw):
@@ -189,13 +185,9 @@ def clean_url(raw):
             "/"
         )
 
-        value = html.unescape(
-            value
-        )
+        value = html.unescape(value)
 
-        value = unquote(
-            value
-        )
+        value = unquote(value)
 
         return value
 
@@ -208,10 +200,7 @@ def clean_url(raw):
 # VIDEO DOWNLOAD
 # =========================================================
 
-def download_video(
-    url,
-    folder
-):
+def download_video(url, folder):
 
     output = os.path.join(
         folder,
@@ -294,13 +283,9 @@ def download_video(
 
     try:
 
-        with yt_dlp.YoutubeDL(
-            options
-        ) as ydl:
+        with yt_dlp.YoutubeDL(options) as ydl:
 
-            ydl.download(
-                [url]
-            )
+            ydl.download([url])
 
     except Exception as error:
 
@@ -314,10 +299,7 @@ def download_video(
 
         raise
 
-
-    files = os.listdir(
-        folder
-    )
+    files = os.listdir(folder)
 
     print(
         "📁 Folder files:",
@@ -337,9 +319,7 @@ def download_video(
             filename
         )
 
-        if os.path.isfile(
-            filepath
-        ):
+        if os.path.isfile(filepath):
 
             size = os.path.getsize(
                 filepath
@@ -358,7 +338,203 @@ def download_video(
 
 
 # =========================================================
-# INSTAGRAM PAGE REQUEST
+# FFMPEG CHECK
+# =========================================================
+
+def check_ffmpeg():
+
+    try:
+
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-version"
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        if result.returncode == 0:
+
+            first_line = (
+                result.stdout
+                .splitlines()[0]
+                if result.stdout
+                else "FFmpeg"
+            )
+
+            print(
+                "✅ FFmpeg:",
+                first_line,
+                flush=True
+            )
+
+            return True
+
+    except Exception as error:
+
+        print(
+            "❌ FFmpeg not found:",
+            repr(error),
+            flush=True
+        )
+
+    return False
+
+
+# =========================================================
+# CONVERT VIDEO FOR TELEGRAM
+# =========================================================
+
+def convert_video_for_telegram(
+    input_file,
+    folder
+):
+
+    output_file = os.path.join(
+        folder,
+        "telegram_video.mp4"
+    )
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "🎬 CONVERTING VIDEO FOR TELEGRAM",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "📥 Input:",
+        input_file,
+        flush=True
+    )
+
+    print(
+        "📤 Output:",
+        output_file,
+        flush=True
+    )
+
+    command = [
+
+        "ffmpeg",
+
+        "-y",
+
+        "-i",
+        input_file,
+
+        # -------------------------
+        # VIDEO
+        # -------------------------
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "veryfast",
+
+        "-crf",
+        "23",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        # -------------------------
+        # AUDIO
+        # -------------------------
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "128k",
+
+        # -------------------------
+        # TELEGRAM / WEB
+        # -------------------------
+
+        "-movflags",
+        "+faststart",
+
+        output_file
+    ]
+
+    try:
+
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        if result.returncode != 0:
+
+            print(
+                "❌ FFmpeg ERROR:",
+                flush=True
+            )
+
+            print(
+                result.stderr,
+                flush=True
+            )
+
+            return input_file
+
+        if os.path.exists(
+            output_file
+        ):
+
+            size = os.path.getsize(
+                output_file
+            )
+
+            print(
+                "✅ Converted video size:",
+                size,
+                flush=True
+            )
+
+            if size > 0:
+
+                return output_file
+
+    except Exception as error:
+
+        print(
+            "❌ FFmpeg exception:",
+            repr(error),
+            flush=True
+        )
+
+        traceback.print_exc()
+
+    print(
+        "⚠️ Original video will be used.",
+        flush=True
+    )
+
+    return input_file
+
+
+# =========================================================
+# INSTAGRAM PAGE
 # =========================================================
 
 def get_instagram_page(url):
@@ -393,13 +569,9 @@ def get_instagram_page(url):
     session = requests.Session()
 
     response = session.get(
-
         url,
-
         headers=headers,
-
         timeout=30,
-
         allow_redirects=True
     )
 
@@ -427,6 +599,8 @@ def get_instagram_page(url):
             f"Instagram HTTP {response.status_code}"
         )
 
+    # MUHIM:
+    # response.text qaytariladi
     return (
         response.text,
         session,
@@ -435,7 +609,7 @@ def get_instagram_page(url):
 
 
 # =========================================================
-# IMAGE URL PARSER
+# EXTRACT IMAGE URLS
 # =========================================================
 
 def extract_image_urls(page):
@@ -471,7 +645,9 @@ def extract_image_urls(page):
 
             image_url = clean_url(raw)
 
-            if not image_url.startswith("http"):
+            if not image_url.startswith(
+                "http"
+            ):
                 continue
 
             if (
@@ -493,10 +669,7 @@ def extract_image_urls(page):
                     image_url
                 )
 
-
-    # =====================================================
     # OG IMAGE
-    # =====================================================
 
     og_patterns = [
 
@@ -519,18 +692,14 @@ def extract_image_urls(page):
 
             if (
                 image_url.startswith("http")
-                and
-                image_url not in image_urls
+                and image_url not in image_urls
             ):
 
                 image_urls.append(
                     image_url
                 )
 
-
-    # =====================================================
     # UNIQUE
-    # =====================================================
 
     unique = []
 
@@ -555,7 +724,7 @@ def extract_image_urls(page):
 
 
 # =========================================================
-# DOWNLOAD IMAGES FROM URLS
+# DOWNLOAD IMAGE URLS
 # =========================================================
 
 def download_image_urls(
@@ -580,11 +749,8 @@ def download_image_urls(
             )
 
             response = session.get(
-
                 image_url,
-
                 headers=headers,
-
                 timeout=30
             )
 
@@ -611,9 +777,11 @@ def download_image_urls(
             extension = ".jpg"
 
             if "png" in content_type:
+
                 extension = ".png"
 
             elif "webp" in content_type:
+
                 extension = ".webp"
 
             filename = os.path.join(
@@ -630,7 +798,9 @@ def download_image_urls(
                     response.content
                 )
 
-            if os.path.getsize(filename) > 0:
+            if os.path.getsize(
+                filename
+            ) > 0:
 
                 downloaded.append(
                     filename
@@ -653,7 +823,7 @@ def download_image_urls(
 
 
 # =========================================================
-# METHOD 1 — REQUESTS HTML
+# IMAGE METHOD 1 — REQUESTS
 # =========================================================
 
 def get_images_requests(
@@ -672,9 +842,7 @@ def get_images_requests(
     )
 
     page, session, headers = (
-        get_instagram_page(
-            url
-        )
+        get_instagram_page(url)
     )
 
     image_urls = extract_image_urls(
@@ -688,6 +856,7 @@ def get_images_requests(
     )
 
     if not image_urls:
+
         return []
 
     return download_image_urls(
@@ -699,7 +868,7 @@ def get_images_requests(
 
 
 # =========================================================
-# METHOD 2 — INSTALOADER
+# IMAGE METHOD 2 — INSTALOADER
 # =========================================================
 
 def get_images_instaloader(
@@ -767,9 +936,12 @@ def get_images_instaloader(
 
     try:
 
-        post = instaloader.Post.from_shortcode(
-            loader.context,
-            shortcode
+        post = (
+            instaloader.Post
+            .from_shortcode(
+                loader.context,
+                shortcode
+            )
         )
 
         print(
@@ -780,9 +952,9 @@ def get_images_instaloader(
 
         downloaded = []
 
-        # =================================================
+        # -----------------------------------------
         # CAROUSEL
-        # =================================================
+        # -----------------------------------------
 
         if post.typename == "GraphSidecar":
 
@@ -812,7 +984,9 @@ def get_images_instaloader(
 
                         continue
 
-                    image_url = node.display_url
+                    image_url = (
+                        node.display_url
+                    )
 
                     filename = os.path.join(
                         folder,
@@ -869,9 +1043,9 @@ def get_images_instaloader(
                         flush=True
                     )
 
-        # =================================================
+        # -----------------------------------------
         # SINGLE IMAGE
-        # =================================================
+        # -----------------------------------------
 
         else:
 
@@ -956,7 +1130,7 @@ def get_images_instaloader(
 
 
 # =========================================================
-# DOWNLOAD POST IMAGES
+# GET INSTAGRAM IMAGES
 # =========================================================
 
 def get_instagram_images(
@@ -964,7 +1138,6 @@ def get_instagram_images(
     folder
 ):
 
-    # First method
     try:
 
         images = get_images_requests(
@@ -984,8 +1157,6 @@ def get_instagram_images(
             flush=True
         )
 
-
-    # Second method
     try:
 
         images = get_images_instaloader(
@@ -1004,7 +1175,6 @@ def get_instagram_images(
             repr(error),
             flush=True
         )
-
 
     return []
 
@@ -1043,6 +1213,16 @@ def download_media(
 
             if video:
 
+                # MUHIM:
+                # Telegram uchun qayta encode
+
+                video = (
+                    convert_video_for_telegram(
+                        video,
+                        folder
+                    )
+                )
+
                 return [video]
 
         except Exception as error:
@@ -1055,7 +1235,6 @@ def download_media(
 
             traceback.print_exc()
 
-        # No image fallback for Reel
         return []
 
 
@@ -1073,10 +1252,7 @@ def download_media(
         flush=True
     )
 
-
-    # =====================================================
-    # TRY VIDEO FIRST
-    # =====================================================
+    # Avval video sifatida urinadi
 
     try:
 
@@ -1086,6 +1262,13 @@ def download_media(
         )
 
         if video:
+
+            video = (
+                convert_video_for_telegram(
+                    video,
+                    folder
+                )
+            )
 
             return [video]
 
@@ -1098,9 +1281,7 @@ def download_media(
         )
 
 
-    # =====================================================
-    # TRY IMAGES
-    # =====================================================
+    # Keyin rasmlar
 
     try:
 
@@ -1123,7 +1304,6 @@ def download_media(
 
         traceback.print_exc()
 
-
     return []
 
 
@@ -1142,8 +1322,7 @@ async def start(
 
         "👋 Салом!\n\n"
 
-        "Instagram Reel ёки Post "
-        "ссылкаси юборинг.\n\n"
+        "Instagram Reel ёки Post ссылкаси юборинг.\n\n"
 
         "🎥 Видео\n"
         "📸 Расм\n"
@@ -1154,7 +1333,7 @@ async def start(
 
 
 # =========================================================
-# MESSAGE HANDLER
+# MAIN MESSAGE HANDLER
 # =========================================================
 
 @dp.message()
@@ -1192,10 +1371,11 @@ async def get_media(
         flush=True
     )
 
+    # -----------------------------------------
+    # URL CHECK
+    # -----------------------------------------
 
-    if not is_instagram_url(
-        url
-    ):
+    if not is_instagram_url(url):
 
         await message.answer(
             "❌ Instagram ссылкаси юборинг."
@@ -1204,21 +1384,26 @@ async def get_media(
         return
 
 
+    # -----------------------------------------
+    # STATUS
+    # -----------------------------------------
+
     status = await message.answer(
         "⏳ Юкланяпти..."
     )
 
+
+    # -----------------------------------------
+    # TEMP FOLDER
+    # -----------------------------------------
 
     with tempfile.TemporaryDirectory() as folder:
 
         try:
 
             media_files = await asyncio.to_thread(
-
                 download_media,
-
                 url,
-
                 folder
             )
 
@@ -1229,52 +1414,55 @@ async def get_media(
             )
 
 
-            # =================================================
+            # -------------------------------------
             # NOTHING FOUND
-            # =================================================
+            # -------------------------------------
 
             if not media_files:
 
                 await status.edit_text(
 
                     "❌ Медиафайлни топа олмадим.\n\n"
+
                     "Instagram ссылка очиқ бўлиши керак."
                 )
 
                 return
 
 
-            # =================================================
-            # UPLOAD START
-            # =================================================
+            # -------------------------------------
+            # UPLOAD
+            # -------------------------------------
 
             await status.edit_text(
                 "📤 Telegram'га юбориляпти..."
             )
 
 
-            # =================================================
+            # =====================================
             # ONE FILE
-            # =================================================
+            # =====================================
 
             if len(media_files) == 1:
 
                 media = media_files[0]
 
                 extension = (
-                    os.path
-                    .splitext(media)[1]
-                    .lower()
+                    os.path.splitext(
+                        media
+                    )[1].lower()
                 )
 
 
-                if extension in (
+                # ---------------------------------
+                # IMAGE
+                # ---------------------------------
 
+                if extension in (
                     ".jpg",
                     ".jpeg",
                     ".png",
                     ".webp"
-
                 ):
 
                     await message.answer_photo(
@@ -1284,19 +1472,26 @@ async def get_media(
                         )
                     )
 
+
+                # ---------------------------------
+                # VIDEO
+                # ---------------------------------
+
                 else:
 
                     await message.answer_video(
 
                         video=FSInputFile(
                             media
-                        )
+                        ),
+
+                        supports_streaming=True
                     )
 
 
-            # =================================================
+            # =====================================
             # MULTIPLE FILES
-            # =================================================
+            # =====================================
 
             else:
 
@@ -1306,25 +1501,22 @@ async def get_media(
                 for media in media_files:
 
                     extension = (
-                        os.path
-                        .splitext(media)[1]
-                        .lower()
+                        os.path.splitext(
+                            media
+                        )[1].lower()
                     )
 
 
                     if extension in (
-
                         ".jpg",
                         ".jpeg",
                         ".png",
                         ".webp"
-
                     ):
 
                         media_group.append(
 
                             InputMediaPhoto(
-
                                 media=FSInputFile(
                                     media
                                 )
@@ -1336,7 +1528,6 @@ async def get_media(
                         media_group.append(
 
                             InputMediaVideo(
-
                                 media=FSInputFile(
                                     media
                                 )
@@ -1344,15 +1535,13 @@ async def get_media(
                         )
 
 
-                # Telegram maximum = 10
+                # Telegram maximum:
+                # 10 media per album
+
                 for i in range(
-
                     0,
-
                     len(media_group),
-
                     10
-
                 ):
 
                     batch = media_group[
@@ -1364,9 +1553,9 @@ async def get_media(
                     )
 
 
-            # =================================================
+            # -------------------------------------
             # DELETE STATUS
-            # =================================================
+            # -------------------------------------
 
             try:
 
@@ -1417,7 +1606,6 @@ async def get_media(
             try:
 
                 await status.edit_text(
-
                     "❌ Юклашда хатолик бўлди."
                 )
 
@@ -1437,16 +1625,20 @@ async def main():
     )
 
 
-    # =====================================================
-    # RENDER WEB SERVER
-    # =====================================================
+    # -----------------------------------------
+    # FFmpeg check
+    # -----------------------------------------
+
+    check_ffmpeg()
+
+
+    # -----------------------------------------
+    # Render server
+    # -----------------------------------------
 
     threading.Thread(
-
         target=start_server,
-
         daemon=True
-
     ).start()
 
 
@@ -1471,14 +1663,13 @@ async def main():
     )
 
 
-    # =====================================================
-    # CLEAR OLD UPDATES
-    # =====================================================
+    # -----------------------------------------
+    # Telegram webhook clear
+    # -----------------------------------------
 
     try:
 
         await bot.delete_webhook(
-
             drop_pending_updates=True
         )
 
@@ -1505,9 +1696,7 @@ async def main():
     try:
 
         await dp.start_polling(
-
             bot,
-
             handle_signals=True
         )
 
