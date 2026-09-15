@@ -6,32 +6,26 @@ import subprocess
 import tempfile
 import threading
 import traceback
-
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import unquote, urlparse
+from pathlib import Path
 
 import requests
 import yt_dlp
 import instaloader
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, FSInputFile
 from aiogram.filters import CommandStart
-from aiogram.types import (
-    FSInputFile,
-    InputMediaPhoto,
-)
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 # =========================================================
-# BOT TOKEN
+# SETTINGS
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN topilmadi")
-
-dp = Dispatcher()
+    raise RuntimeError("BOT_TOKEN topilmadi!")
 
 
 # =========================================================
@@ -39,183 +33,304 @@ dp = Dispatcher()
 # =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
-
     def do_GET(self):
-
         self.send_response(200)
-
-        self.send_header(
-            "Content-Type",
-            "text/plain; charset=utf-8"
-        )
-
+        self.send_header("Content-Type", "text/plain")
         self.end_headers()
-
-        self.wfile.write(
-            b"Instagram Telegram Bot is running!"
-        )
+        self.wfile.write(b"OK")
 
     def log_message(self, format, *args):
         pass
 
 
-def start_server():
+def start_health_server():
+    port = int(os.environ.get("PORT", "10000"))
 
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+
+    print(f"🌐 Render web server started on port {port}")
+
+    thread = threading.Thread(
+        target=server.serve_forever,
+        daemon=True
     )
-
-    server = HTTPServer(
-        ("0.0.0.0", port),
-        HealthHandler
-    )
-
-    print(
-        f"🌐 Render web server started on port {port}",
-        flush=True
-    )
-
-    server.serve_forever()
+    thread.start()
 
 
 # =========================================================
-# INSTAGRAM URL
+# HELPERS
 # =========================================================
 
-def is_instagram_url(text):
-
+def is_instagram_url(text: str) -> bool:
     if not text:
         return False
 
-    pattern = (
-        r"https?://"
-        r"(www\.)?"
-        r"instagram\.com/"
-        r"(reel|reels|p|tv)/"
-    )
-
-    return re.search(
-        pattern,
-        text,
-        re.IGNORECASE
-    )
-
-
-def is_reel_url(url):
-
     return bool(
         re.search(
-            r"instagram\.com/(reel|reels)/",
+            r"https?://(?:www\.)?instagram\.com/",
+            text,
+            re.IGNORECASE
+        )
+    )
+
+
+def is_reel_url(url: str) -> bool:
+    return bool(
+        re.search(
+            r"instagram\.com/(reel|reels|tv)/",
             url,
             re.IGNORECASE
         )
     )
 
 
-# =========================================================
-# SHORTCODE
-# =========================================================
+def clean_url(url: str) -> str:
+    url = url.strip()
 
-def get_shortcode(url):
+    # Telegram yoki boshqa matndan ortiqcha belgilar
+    url = url.split()[0]
 
-    try:
+    # Query parametrlarini olib tashlaymiz
+    url = url.split("?")[0]
 
-        parsed = urlparse(url)
+    return url.rstrip("/")
 
-        parts = [
-            x
-            for x in parsed.path.split("/")
-            if x
-        ]
 
-        if (
-            len(parts) >= 2
-            and parts[0].lower()
-            in ("p", "reel", "reels", "tv")
-        ):
+def get_shortcode(url: str):
+    match = re.search(
+        r"instagram\.com/(?:p|reel|reels|tv)/([^/?#]+)",
+        url,
+        re.IGNORECASE
+    )
 
-            return parts[1]
-
-    except Exception as error:
-
-        print(
-            "❌ Shortcode error:",
-            repr(error),
-            flush=True
-        )
+    if match:
+        return match.group(1)
 
     return None
 
 
 # =========================================================
-# CLEAN URL
+# FFMPEG CHECK
 # =========================================================
 
-def clean_url(raw):
+def check_ffmpeg():
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode == 0:
+            first_line = result.stdout.splitlines()[0]
+            print(f"✅ FFmpeg: {first_line}")
+            return True
+
+    except Exception as e:
+        print(f"❌ FFmpeg error: {e}")
+
+    return False
+
+
+# =========================================================
+# VIDEO CODEC
+# =========================================================
+
+def get_video_codecs(file_path: str):
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,width,height,r_frame_rate",
+                "-of",
+                "default=noprint_wrappers=1",
+                file_path
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0:
+            return None, None, None, None
+
+        data = {}
+
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                data[key] = value
+
+        codec = data.get("codec_name")
+        width = data.get("width")
+        height = data.get("height")
+        fps = data.get("r_frame_rate")
+
+        return codec, width, height, fps
+
+    except Exception as e:
+        print(f"⚠️ ffprobe error: {e}")
+        return None, None, None, None
+
+
+# =========================================================
+# CONVERT VIDEO
+# =========================================================
+
+def convert_video_for_telegram(input_file: str, output_file: str):
+    print("🎬 PREPARING VIDEO FOR TELEGRAM")
+
+    codec, width, height, fps = get_video_codecs(input_file)
+
+    print(f"🎞 Video codec: {codec}")
+    print(f"📐 Resolution: {width}x{height}")
+    print(f"🎞 FPS: {fps}")
+
+    if codec == "h264":
+        print("✅ Video already H.264")
+
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    input_file,
+                    "-c",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                    output_file
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30
+            )
+
+            if os.path.exists(output_file):
+                print("✅ Remux successful")
+                return output_file
+
+        except Exception as e:
+            print(f"⚠️ Remux error: {e}")
+
+    print("🔄 Video qayta kodlanadi...")
+    print("🎥 H.264 + AAC")
 
     try:
 
-        value = raw
+        # MUHIM:
+        # Render Free serverda og'ir videoni to'liq original
+        # resolutionda encode qilish juda og'ir.
+        #
+        # Shuning uchun maksimal kenglikni 720px qilamiz.
+        # Video harakatlanadi va Telegram bilan yaxshi ishlaydi.
 
-        value = value.replace(
-            "\\/",
-            "/"
+        command = [
+            "ffmpeg",
+            "-y",
+
+            "-i",
+            input_file,
+
+            # maksimal 720px
+            "-vf",
+            "scale=min(720\\,iw):-2",
+
+            # FPS maksimal 30
+            "-r",
+            "30",
+
+            # H.264
+            "-c:v",
+            "libx264",
+
+            # Render uchun eng tez preset
+            "-preset",
+            "ultrafast",
+
+            # Sifat
+            "-crf",
+            "30",
+
+            # Telegram compatibility
+            "-pix_fmt",
+            "yuv420p",
+
+            # Audio
+            "-c:a",
+            "aac",
+
+            "-b:a",
+            "96k",
+
+            # MP4 streaming
+            "-movflags",
+            "+faststart",
+
+            output_file
+        ]
+
+        print("🚀 FFmpeg started...")
+
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60
         )
 
-        value = value.replace(
-            "\\u0026",
-            "&"
-        )
+        if result.returncode != 0:
+            print("❌ FFmpeg failed")
+            print(result.stderr[-3000:])
+            return None
 
-        value = value.replace(
-            "\\u003D",
-            "="
-        )
+        if not os.path.exists(output_file):
+            print("❌ Output file not found")
+            return None
 
-        value = value.replace(
-            "\\u0025",
-            "%"
-        )
+        size = os.path.getsize(output_file)
 
-        value = value.replace(
-            "\\u002F",
-            "/"
-        )
+        if size < 10000:
+            print("❌ Output video juda kichik")
+            return None
 
-        value = html.unescape(value)
+        print(f"✅ Video converted: {size} bytes")
 
-        value = unquote(value)
+        return output_file
 
-        return value
+    except subprocess.TimeoutExpired:
+        print("⏰ FFmpeg timeout!")
+        return None
 
-    except Exception:
-
-        return raw
+    except Exception as e:
+        print(f"❌ Conversion error: {e}")
+        traceback.print_exc()
+        return None
 
 
 # =========================================================
-# VIDEO DOWNLOAD
+# DOWNLOAD VIDEO WITH YT-DLP
 # =========================================================
 
-def download_video(url, folder):
+def download_video(url: str, folder: str):
+    print("🎥 Instagram video yuklanmoqda...")
+    print(url)
 
-    print("")
-    print("========================================")
-    print("🎥 VIDEO DOWNLOAD")
-    print("========================================")
-    print("🔗 URL:", url, flush=True)
-
-    output = os.path.join(
+    output_template = os.path.join(
         folder,
         "video.%(ext)s"
     )
 
     options = {
-
-        "outtmpl": output,
+        "outtmpl": output_template,
 
         "format": (
             "bestvideo[ext=mp4]+"
@@ -238,10 +353,15 @@ def download_video(url, folder):
 
         "overwrites": True,
 
+        "quiet": False,
+
+        "no_warnings": False,
+
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
                 "Chrome/140.0.0.0 Safari/537.36"
             ),
 
@@ -254,807 +374,183 @@ def download_video(url, folder):
     try:
 
         with yt_dlp.YoutubeDL(options) as ydl:
-
             ydl.download([url])
 
-        files = os.listdir(folder)
+        files = list(Path(folder).glob("video.*"))
 
-        print(
-            "📁 Folder files:",
-            files,
-            flush=True
-        )
+        # mp4ni afzal ko'ramiz
+        mp4_files = [
+            f for f in files
+            if f.suffix.lower() == ".mp4"
+        ]
 
-        video_files = []
-
-        for filename in files:
-
-            full_path = os.path.join(
-                folder,
-                filename
-            )
-
-            if not os.path.isfile(full_path):
-                continue
-
-            lower = filename.lower()
-
-            if lower.endswith(
-                (
-                    ".mp4",
-                    ".mov",
-                    ".mkv",
-                    ".webm"
-                )
-            ):
-
-                video_files.append(
-                    full_path
-                )
-
-        if not video_files:
-
-            print(
-                "❌ Video file topilmadi",
-                flush=True
-            )
-
+        if mp4_files:
+            file_path = str(mp4_files[0])
+        elif files:
+            file_path = str(files[0])
+        else:
+            print("❌ Video topilmadi")
             return None
 
-        video = max(
-            video_files,
-            key=os.path.getsize
-        )
+        print(f"✅ Video downloaded: {file_path}")
 
-        print(
-            "📦 Video:",
-            video,
-            flush=True
-        )
+        return file_path
 
-        print(
-            "📦 Video size:",
-            os.path.getsize(video),
-            flush=True
-        )
-
-        return video
-
-    except Exception as error:
-
-        print(
-            "❌ Video download error:",
-            repr(error),
-            flush=True
-        )
-
-        traceback.print_exc()
-
+    except Exception as e:
+        print(f"❌ yt-dlp error: {e}")
         return None
-
-
-# =========================================================
-# FFMPEG CHECK
-# =========================================================
-
-def check_ffmpeg():
-
-    try:
-
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-version"
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10
-        )
-
-        first_line = (
-            result.stdout.splitlines()[0]
-            if result.stdout
-            else "FFmpeg mavjud"
-        )
-
-        print(
-            "✅ FFmpeg:",
-            first_line,
-            flush=True
-        )
-
-        return True
-
-    except Exception as error:
-
-        print(
-            "❌ FFmpeg topilmadi:",
-            repr(error),
-            flush=True
-        )
-
-        return False
-
-
-# =========================================================
-# VIDEO CODEC
-# =========================================================
-
-def get_video_codecs(video):
-
-    video_codec = None
-    audio_codec = None
-
-    try:
-
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                video
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10
-        )
-
-        if result.stdout.strip():
-
-            video_codec = (
-                result.stdout
-                .strip()
-                .splitlines()[0]
-                .lower()
-            )
-
-    except Exception as error:
-
-        print(
-            "⚠️ Video codec aniqlanmadi:",
-            repr(error),
-            flush=True
-        )
-
-    try:
-
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "a:0",
-                "-show_entries",
-                "stream=codec_name",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                video
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10
-        )
-
-        if result.stdout.strip():
-
-            audio_codec = (
-                result.stdout
-                .strip()
-                .splitlines()[0]
-                .lower()
-            )
-
-    except Exception as error:
-
-        print(
-            "⚠️ Audio codec aniqlanmadi:",
-            repr(error),
-            flush=True
-        )
-
-    print(
-        "🎞 Video codec:",
-        video_codec,
-        flush=True
-    )
-
-    print(
-        "🔊 Audio codec:",
-        audio_codec,
-        flush=True
-    )
-
-    return video_codec, audio_codec
-
-
-# =========================================================
-# CONVERT VIDEO FOR TELEGRAM
-# =========================================================
-
-def convert_video_for_telegram(video):
-
-    print("")
-    print("========================================")
-    print("🎬 PREPARING VIDEO FOR TELEGRAM")
-    print("========================================")
-
-    if not video or not os.path.exists(video):
-
-        print(
-            "❌ Video mavjud emas",
-            flush=True
-        )
-
-        return None
-
-    output = os.path.join(
-        os.path.dirname(video),
-        "telegram_video.mp4"
-    )
-
-    video_codec, audio_codec = get_video_codecs(
-        video
-    )
-
-    # -----------------------------------------------------
-    # H.264 + AAC bo'lsa, qayta kodlamaymiz
-    # -----------------------------------------------------
-
-    compatible_video = (
-        video_codec == "h264"
-    )
-
-    compatible_audio = (
-        audio_codec in (
-            "aac",
-            "mp4a"
-        )
-    )
-
-    if compatible_video and compatible_audio:
-
-        print(
-            "⚡ Video Telegram uchun mos.",
-            flush=True
-        )
-
-        print(
-            "⚡ Faqat remux qilamiz...",
-            flush=True
-        )
-
-        try:
-
-            result = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    video,
-                    "-c",
-                    "copy",
-                    "-movflags",
-                    "+faststart",
-                    output
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=30
-            )
-
-            if (
-                result.returncode == 0
-                and os.path.exists(output)
-                and os.path.getsize(output) > 0
-            ):
-
-                print(
-                    "✅ Remux muvaffaqiyatli",
-                    flush=True
-                )
-
-                print(
-                    "📦 Output size:",
-                    os.path.getsize(output),
-                    flush=True
-                )
-
-                return output
-
-            print(
-                "⚠️ Remux ishlamadi",
-                flush=True
-            )
-
-            if result.stderr:
-
-                print(
-                    result.stderr[-2000:],
-                    flush=True
-                )
-
-        except subprocess.TimeoutExpired:
-
-            print(
-                "⏱️ Remux timeout",
-                flush=True
-            )
-
-        except Exception as error:
-
-            print(
-                "❌ Remux error:",
-                repr(error),
-                flush=True
-            )
-
-        return video
-
-    # -----------------------------------------------------
-    # Mos kelmasa H.264 + AAC ga o'tkazamiz
-    # -----------------------------------------------------
-
-    print(
-        "🔄 Video qayta kodlanadi...",
-        flush=True
-    )
-
-    print(
-        "🎥 H.264 + AAC",
-        flush=True
-    )
-
-    try:
-
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-
-                "-i",
-                video,
-
-                "-c:v",
-                "libx264",
-
-                "-preset",
-                "ultrafast",
-
-                "-crf",
-                "28",
-
-                "-pix_fmt",
-                "yuv420p",
-
-                "-c:a",
-                "aac",
-
-                "-b:a",
-                "96k",
-
-                "-movflags",
-                "+faststart",
-
-                output
-            ],
-
-            stdout=subprocess.PIPE,
-
-            stderr=subprocess.PIPE,
-
-            text=True,
-
-            timeout=90
-        )
-
-        if (
-            result.returncode == 0
-            and os.path.exists(output)
-            and os.path.getsize(output) > 0
-        ):
-
-            print(
-                "✅ Video conversion muvaffaqiyatli",
-                flush=True
-            )
-
-            print(
-                "📦 Output size:",
-                os.path.getsize(output),
-                flush=True
-            )
-
-            return output
-
-        print(
-            "❌ Video conversion ishlamadi",
-            flush=True
-        )
-
-        if result.stderr:
-
-            print(
-                result.stderr[-3000:],
-                flush=True
-            )
-
-        return video
-
-    except subprocess.TimeoutExpired:
-
-        print(
-            "⏱️ FFmpeg 90 sekunddan oshdi",
-            flush=True
-        )
-
-        return video
-
-    except Exception as error:
-
-        print(
-            "❌ Conversion error:",
-            repr(error),
-            flush=True
-        )
-
-        traceback.print_exc()
-
-        return video
 
 
 # =========================================================
 # INSTAGRAM PAGE
 # =========================================================
 
-def get_instagram_page(url):
-
-    session = requests.Session()
-
+def get_instagram_html(url: str):
     headers = {
-
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
             "Chrome/140.0.0.0 Safari/537.36"
         ),
-
         "Accept-Language": "en-US,en;q=0.9",
-
-        "Accept": (
-            "text/html,application/xhtml+xml,"
-            "application/xml;q=0.9,image/avif,"
-            "image/webp,*/*;q=0.8"
-        ),
-
         "Referer": "https://www.instagram.com/",
     }
 
     try:
 
-        response = session.get(
+        response = requests.get(
             url,
             headers=headers,
-            timeout=20
+            timeout=30
         )
 
         print(
-            "📡 Instagram status:",
-            response.status_code,
-            flush=True
+            f"🌐 Instagram status: {response.status_code}"
         )
+
+        if response.status_code != 200:
+            return None
 
         print(
-            "🌐 Final URL:",
-            response.url,
-            flush=True
+            f"📄 HTML size: {len(response.text)}"
         )
 
-        print(
-            "📄 HTML size:",
-            len(response.text),
-            flush=True
-        )
+        return response.text
 
-        return (
-            response.text,
-            session,
-            headers
-        )
-
-    except Exception as error:
-
-        print(
-            "❌ Instagram page error:",
-            repr(error),
-            flush=True
-        )
-
-        return (
-            "",
-            session,
-            headers
-        )
+    except Exception as e:
+        print(f"❌ Instagram request error: {e}")
+        return None
 
 
 # =========================================================
 # IMAGE URL EXTRACTION
 # =========================================================
 
-def extract_image_urls(html_text):
+def extract_image_urls(html_text: str):
+    if not html_text:
+        return []
 
     urls = []
 
-    if not html_text:
-
-        return urls
-
     patterns = [
-
-        r'"display_url":"([^"]+)"',
-
-        r'"thumbnail_src":"([^"]+)"',
-
-        r'"image_url":"([^"]+)"',
-
-        r'"src":"(https?://[^"]+\.(?:jpg|jpeg|png)[^"]*)"',
+        r'https://[^"\']+\.jpg[^"\']*',
+        r'https://[^"\']+\.jpeg[^"\']*',
+        r'https://[^"\']+\.png[^"\']*',
     ]
 
     for pattern in patterns:
 
-        try:
-
-            matches = re.findall(
-                pattern,
-                html_text,
-                re.IGNORECASE
-            )
-
-            for raw_url in matches:
-
-                url = clean_url(raw_url)
-
-                if url not in urls:
-
-                    urls.append(url)
-
-        except Exception:
-            pass
-
-    # Direct image URLs
-    direct_pattern = (
-        r'https?://[^"\']+'
-        r'\.(?:jpg|jpeg|png)'
-        r'(?:\?[^"\']*)?'
-    )
-
-    try:
-
         matches = re.findall(
-            direct_pattern,
+            pattern,
             html_text,
             re.IGNORECASE
         )
 
-        for raw_url in matches:
+        for url in matches:
 
-            url = clean_url(raw_url)
+            url = html.unescape(url)
 
-            if url not in urls:
-
-                urls.append(url)
-
-    except Exception:
-        pass
-
-    # OG image
-    try:
-
-        og_matches = re.findall(
-            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
-            html_text,
-            re.IGNORECASE
-        )
-
-        for raw_url in og_matches:
-
-            url = clean_url(raw_url)
+            url = url.replace("\\u0026", "&")
+            url = url.replace("\\/", "/")
 
             if url not in urls:
-
                 urls.append(url)
 
-    except Exception:
-        pass
-
-    print(
-        "🖼 Found image URLs:",
-        len(urls),
-        flush=True
-    )
+    print(f"🖼 Found {len(urls)} image URLs")
 
     return urls
 
 
 # =========================================================
-# DOWNLOAD IMAGE URLS
+# DOWNLOAD IMAGE
 # =========================================================
 
-def download_image_urls(
-    urls,
-    session,
-    headers,
-    folder
-):
+def download_image(url: str, path: str):
+    try:
 
-    files = []
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/140.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.instagram.com/",
+        }
 
-    for index, url in enumerate(
-        urls,
-        start=1
-    ):
-
-        try:
-
-            response = session.get(
-                url,
-                headers=headers,
-                timeout=20
-            )
-
-            if response.status_code != 200:
-
-                print(
-                    f"⚠️ Image {index}: HTTP {response.status_code}",
-                    flush=True
-                )
-
-                continue
-
-            content_type = (
-                response.headers
-                .get(
-                    "Content-Type",
-                    ""
-                )
-                .lower()
-            )
-
-            if (
-                "image" not in content_type
-                and not url.lower().endswith(
-                    (
-                        ".jpg",
-                        ".jpeg",
-                        ".png",
-                        ".webp"
-                    )
-                )
-            ):
-
-                continue
-
-            extension = ".jpg"
-
-            if "png" in content_type:
-                extension = ".png"
-
-            elif "webp" in content_type:
-                extension = ".webp"
-
-            filename = os.path.join(
-                folder,
-                f"image_{index}{extension}"
-            )
-
-            with open(
-                filename,
-                "wb"
-            ) as file:
-
-                file.write(
-                    response.content
-                )
-
-            if os.path.getsize(filename) > 0:
-
-                files.append(filename)
-
-                print(
-                    f"✅ Image {index} saved",
-                    flush=True
-                )
-
-        except Exception as error:
-
-            print(
-                f"⚠️ Image {index} error:",
-                repr(error),
-                flush=True
-            )
-
-    return files
-
-
-# =========================================================
-# REQUESTS IMAGE METHOD
-# =========================================================
-
-def get_images_requests(url, folder):
-
-    print("")
-    print("========================================")
-    print("🖼 INSTAGRAM IMAGE SEARCH")
-    print("========================================")
-
-    html_text, session, headers = get_instagram_page(
-        url
-    )
-
-    if not html_text:
-
-        return []
-
-    urls = extract_image_urls(
-        html_text
-    )
-
-    if not urls:
-
-        return []
-
-    return download_image_urls(
-        urls,
-        session,
-        headers,
-        folder
-    )
-
-
-# =========================================================
-# INSTALOADER IMAGE METHOD
-# =========================================================
-
-def get_images_instaloader(
-    url,
-    folder
-):
-
-    print("")
-    print("========================================")
-    print("📸 INSTALOADER FALLBACK")
-    print("========================================")
-
-    shortcode = get_shortcode(
-        url
-    )
-
-    if not shortcode:
-
-        print(
-            "❌ Shortcode topilmadi",
-            flush=True
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=30
         )
 
+        if response.status_code != 200:
+            print(
+                f"❌ Image status: {response.status_code}"
+            )
+            return False
+
+        with open(path, "wb") as f:
+            f.write(response.content)
+
+        print(
+            f"✅ Image downloaded: {path}"
+        )
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Image error: {e}")
+        return False
+
+
+# =========================================================
+# INSTALOADER FALLBACK
+# =========================================================
+
+def download_with_instaloader(
+    url: str,
+    folder: str
+):
+
+    shortcode = get_shortcode(url)
+
+    if not shortcode:
+        print("❌ Shortcode topilmadi")
         return []
+
+    print(
+        f"🔄 Instaloader fallback: {shortcode}"
+    )
 
     try:
 
         loader = instaloader.Instaloader(
+            dirname_pattern=folder,
+            filename_pattern="{shortcode}_{mediacount}",
             download_videos=False,
-            download_comments=False,
             save_metadata=False,
-            compress_json=False,
             post_metadata_txt_pattern=""
         )
 
@@ -1063,549 +559,375 @@ def get_images_instaloader(
             shortcode
         )
 
-        files = []
+        downloaded = []
 
-        # -------------------------------------------------
         # Carousel
-        # -------------------------------------------------
-
         if post.typename == "GraphSidecar":
-
-            print(
-                "🖼 Carousel detected",
-                flush=True
-            )
 
             index = 1
 
             for node in post.get_sidecar_nodes():
 
                 if node.is_video:
-
-                    print(
-                        f"⏭ Video item {index} skipped",
-                        flush=True
-                    )
-
-                    index += 1
-
                     continue
 
                 image_url = node.display_url
 
-                try:
+                path = os.path.join(
+                    folder,
+                    f"image_{index}.jpg"
+                )
 
-                    response = requests.get(
-                        image_url,
-                        headers={
-                            "User-Agent":
-                                "Mozilla/5.0"
-                        },
-                        timeout=30
-                    )
-
-                    if response.status_code != 200:
-
-                        index += 1
-                        continue
-
-                    filename = os.path.join(
-                        folder,
-                        f"image_{index}.jpg"
-                    )
-
-                    with open(
-                        filename,
-                        "wb"
-                    ) as file:
-
-                        file.write(
-                            response.content
-                        )
-
-                    if os.path.getsize(filename) > 0:
-
-                        files.append(
-                            filename
-                        )
-
-                        print(
-                            f"✅ Carousel image {index} saved",
-                            flush=True
-                        )
-
-                except Exception as error:
-
-                    print(
-                        f"⚠️ Carousel image {index} error:",
-                        repr(error),
-                        flush=True
-                    )
+                if download_image(
+                    image_url,
+                    path
+                ):
+                    downloaded.append(path)
 
                 index += 1
 
-            print(
-                "📸 Instaloader downloaded:",
-                len(files),
-                flush=True
-            )
+        else:
 
-            return files
+            if not post.is_video:
 
-        # -------------------------------------------------
-        # Single image
-        # -------------------------------------------------
+                image_url = post.url
 
-        if post.is_video:
+                path = os.path.join(
+                    folder,
+                    "image_1.jpg"
+                )
 
-            print(
-                "🎥 Post is video",
-                flush=True
-            )
-
-            return []
-
-        image_url = post.url
-
-        response = requests.get(
-            image_url,
-            headers={
-                "User-Agent":
-                    "Mozilla/5.0"
-            },
-            timeout=30
-        )
-
-        if response.status_code != 200:
-
-            return []
-
-        filename = os.path.join(
-            folder,
-            "image_1.jpg"
-        )
-
-        with open(
-            filename,
-            "wb"
-        ) as file:
-
-            file.write(
-                response.content
-            )
-
-        if os.path.getsize(filename) > 0:
-
-            print(
-                "✅ Single image saved",
-                flush=True
-            )
-
-            return [filename]
-
-    except Exception as error:
+                if download_image(
+                    image_url,
+                    path
+                ):
+                    downloaded.append(path)
 
         print(
-            "❌ Instaloader error:",
-            repr(error),
-            flush=True
+            f"✅ Instaloader images: {len(downloaded)}"
         )
 
-        traceback.print_exc()
+        return downloaded
 
-    return []
-
-
-# =========================================================
-# GET IMAGES
-# =========================================================
-
-def get_instagram_images(
-    url,
-    folder
-):
-
-    # 1. Requests
-    try:
-
-        files = get_images_requests(
-            url,
-            folder
-        )
-
-        if files:
-
-            print(
-                "✅ Images found using requests:",
-                len(files),
-                flush=True
-            )
-
-            return files
-
-    except Exception as error:
+    except Exception as e:
 
         print(
-            "⚠️ Requests image method error:",
-            repr(error),
-            flush=True
+            f"❌ Instaloader error: {e}"
         )
 
-    # 2. Instaloader fallback
-    try:
-
-        files = get_images_instaloader(
-            url,
-            folder
-        )
-
-        if files:
-
-            return files
-
-    except Exception as error:
-
-        print(
-            "⚠️ Instaloader fallback error:",
-            repr(error),
-            flush=True
-        )
-
-    return []
+        return []
 
 
 # =========================================================
 # DOWNLOAD MEDIA
 # =========================================================
 
-def download_media(
-    url,
-    folder
-):
+def download_media(url: str, folder: str):
 
-    # =====================================================
+    reel = is_reel_url(url)
+
+    print(f"📌 Reel: {reel}")
+
+    # -----------------------------------------------------
     # REEL
-    # =====================================================
+    # -----------------------------------------------------
 
-    if is_reel_url(url):
+    if reel:
 
-        print("")
-        print("🎬 REEL DETECTED")
-
-        video = download_video(
+        original = download_video(
             url,
             folder
         )
 
-        if not video:
+        if not original:
+            return {
+                "type": "none",
+                "files": []
+            }
 
-            return []
-
-        # Telegram uchun tayyorlash
-        video = convert_video_for_telegram(
-            video
+        converted = os.path.join(
+            folder,
+            "telegram_video.mp4"
         )
 
-        if not video:
+        result = convert_video_for_telegram(
+            original,
+            converted
+        )
 
-            return []
+        if result:
+            return {
+                "type": "video",
+                "files": [result]
+            }
 
-        return [video]
+        # Conversion ishlamasa originalni yubormaymiz,
+        # chunki VP9 Telegramda rasmdagidek ko'rinishi mumkin.
+        return {
+            "type": "none",
+            "files": []
+        }
 
-    # =====================================================
-    # POST
-    # =====================================================
+    # -----------------------------------------------------
+    # POST VIDEO
+    # -----------------------------------------------------
 
-    print("")
-    print("📦 POST DETECTED")
+    print("📦 Post media tekshirilmoqda...")
 
-    # Avval video tekshiramiz
-    video = download_video(
+    original = download_video(
         url,
         folder
     )
 
-    if video:
+    if original:
 
-        video = convert_video_for_telegram(
-            video
+        converted = os.path.join(
+            folder,
+            "telegram_video.mp4"
         )
 
-        if video:
+        result = convert_video_for_telegram(
+            original,
+            converted
+        )
 
-            return [video]
+        if result:
 
-    # Keyin rasmlar
-    images = get_instagram_images(
-        url,
-        folder
+            return {
+                "type": "video",
+                "files": [result]
+            }
+
+    # -----------------------------------------------------
+    # IMAGES
+    # -----------------------------------------------------
+
+    print("🖼 Video topilmadi. Rasmlar qidirilmoqda...")
+
+    html_text = get_instagram_html(url)
+
+    image_urls = extract_image_urls(
+        html_text
     )
 
-    return images
+    downloaded = []
+
+    index = 1
+
+    for image_url in image_urls:
+
+        if len(downloaded) >= 20:
+            break
+
+        path = os.path.join(
+            folder,
+            f"image_{index}.jpg"
+        )
+
+        if download_image(
+            image_url,
+            path
+        ):
+            downloaded.append(path)
+
+        index += 1
+
+    # -----------------------------------------------------
+    # INSTALOADER FALLBACK
+    # -----------------------------------------------------
+
+    if not downloaded:
+
+        downloaded = download_with_instaloader(
+            url,
+            folder
+        )
+
+    if downloaded:
+
+        return {
+            "type": "images",
+            "files": downloaded
+        }
+
+    return {
+        "type": "none",
+        "files": []
+    }
 
 
 # =========================================================
-# TELEGRAM UPLOAD
+# SEND MEDIA
 # =========================================================
 
-async def send_media_to_telegram(
-    message,
-    media_files
+async def send_media(
+    message: Message,
+    media_type: str,
+    files: list
 ):
 
-    if not media_files:
+    # -----------------------------------------------------
+    # VIDEO
+    # -----------------------------------------------------
 
-        await message.answer(
-            "❌ Media topilmadi."
-        )
+    if media_type == "video":
 
-        return
-
-    print("")
-    print("========================================")
-    print("📤 TELEGRAM UPLOAD")
-    print("========================================")
-
-    print(
-        "📦 MEDIA FILES:",
-        media_files,
-        flush=True
-    )
-
-    # =====================================================
-    # Bitta fayl
-    # =====================================================
-
-    if len(media_files) == 1:
-
-        media = media_files[0]
-
-        if not os.path.exists(media):
-
-            await message.answer(
-                "❌ Fayl topilmadi."
-            )
-
-            return
-
-        size = os.path.getsize(
-            media
-        )
+        video_path = files[0]
 
         print(
-            "📦 Upload file size:",
-            size,
-            flush=True
+            "📤 Uploading video to Telegram..."
         )
 
-        lower = media.lower()
+        try:
 
-        # -------------------------------------------------
-        # Video
-        # -------------------------------------------------
-
-        if lower.endswith(
-            (
-                ".mp4",
-                ".mov",
-                ".mkv",
-                ".webm"
+            await message.answer_video(
+                video=FSInputFile(video_path),
+                supports_streaming=True
             )
-        ):
 
             print(
-                "📤 Uploading video to Telegram...",
-                flush=True
+                "✅ Video sent successfully"
             )
+
+            return True
+
+        except Exception as e:
+
+            print(
+                f"❌ Video upload error: {e}"
+            )
+
+            # fallback document
+            try:
+
+                print(
+                    "📄 Sending video as document..."
+                )
+
+                await message.answer_document(
+                    document=FSInputFile(
+                        video_path
+                    )
+                )
+
+                return True
+
+            except Exception as e2:
+
+                print(
+                    f"❌ Document error: {e2}"
+                )
+
+                return False
+
+    # -----------------------------------------------------
+    # ONE IMAGE
+    # -----------------------------------------------------
+
+    if media_type == "images":
+
+        if len(files) == 1:
 
             try:
 
-                await message.answer_video(
-                    video=FSInputFile(
-                        media
-                    ),
-
-                    supports_streaming=True,
-
-                    caption="🎬 Instagram"
+                await message.answer_photo(
+                    photo=FSInputFile(
+                        files[0]
+                    )
                 )
+
+                return True
+
+            except Exception as e:
 
                 print(
-                    "✅ Video uploaded to Telegram",
-                    flush=True
+                    f"❌ Photo error: {e}"
                 )
 
-            except Exception as error:
-
-                print(
-                    "❌ Telegram video upload error:",
-                    repr(error),
-                    flush=True
-                )
-
-                traceback.print_exc()
-
-                # Document sifatida yuborishga urinib ko'ramiz
-                try:
-
-                    print(
-                        "📄 Trying document upload...",
-                        flush=True
-                    )
-
-                    await message.answer_document(
-                        document=FSInputFile(
-                            media
-                        ),
-
-                        caption="🎬 Instagram video"
-                    )
-
-                    print(
-                        "✅ Video sent as document",
-                        flush=True
-                    )
-
-                except Exception as document_error:
-
-                    print(
-                        "❌ Document upload error:",
-                        repr(document_error),
-                        flush=True
-                    )
-
-                    await message.answer(
-                        "❌ Videoni Telegram'га юборишда хатолик."
-                    )
-
-            return
+                return False
 
         # -------------------------------------------------
-        # Bitta rasm
+        # MULTIPLE IMAGES
         # -------------------------------------------------
 
         print(
-            "📤 Uploading photo...",
-            flush=True
+            f"📸 Sending {len(files)} images..."
         )
 
-        try:
-
-            await message.answer_photo(
-                photo=FSInputFile(
-                    media
-                ),
-
-                caption="📸 Instagram"
-            )
-
-            print(
-                "✅ Photo uploaded",
-                flush=True
-            )
-
-        except Exception as error:
-
-            print(
-                "❌ Photo upload error:",
-                repr(error),
-                flush=True
-            )
-
-        return
-
-    # =====================================================
-    # Bir nechta rasmlar
-    # =====================================================
-
-    print(
-        f"📸 Sending {len(media_files)} images...",
-        flush=True
-    )
-
-    # Telegram MediaGroup maksimum 10 ta
-    batch_size = 10
-
-    for start in range(
-        0,
-        len(media_files),
-        batch_size
-    ):
-
-        batch = media_files[
-            start:start + batch_size
-        ]
-
-        media_group = []
-
-        for index, filename in enumerate(
-            batch
+        # Telegram album max 10
+        for i in range(
+            0,
+            len(files),
+            10
         ):
 
-            if not os.path.exists(filename):
+            batch = files[
+                i:i + 10
+            ]
 
-                continue
+            media = []
 
-            media_group.append(
-                InputMediaPhoto(
-                    media=FSInputFile(
-                        filename
+            from aiogram.types import InputMediaPhoto
+
+            for path in batch:
+
+                media.append(
+                    InputMediaPhoto(
+                        media=FSInputFile(
+                            path
+                        )
                     )
                 )
-            )
 
-        if not media_group:
+            try:
 
-            continue
+                await message.answer_media_group(
+                    media=media
+                )
 
-        try:
+            except Exception as e:
 
-            print(
-                f"📤 Uploading album "
-                f"{start + 1}-{start + len(batch)}...",
-                flush=True
-            )
+                print(
+                    f"❌ Album error: {e}"
+                )
 
-            await message.answer_media_group(
-                media=media_group
-            )
+                return False
 
-            print(
-                f"✅ Album uploaded: "
-                f"{start + 1}-{start + len(batch)}",
-                flush=True
-            )
+        print(
+            "✅ Images sent successfully"
+        )
 
-        except Exception as error:
+        return True
 
-            print(
-                "❌ Media group error:",
-                repr(error),
-                flush=True
-            )
-
-            traceback.print_exc()
-
-            await message.answer(
-                "❌ Расмларни юборишда хатолик."
-            )
+    return False
 
 
 # =========================================================
-# /START
+# BOT
 # =========================================================
 
-@dp.message(
-    CommandStart()
+bot = Bot(
+    token=BOT_TOKEN
 )
+
+dp = Dispatcher()
+
+
+# =========================================================
+# START
+# =========================================================
+
+@dp.message(CommandStart())
 async def start_handler(
-    message: types.Message
+    message: Message
 ):
 
     await message.answer(
         "👋 Салом!\n\n"
-        "Instagram Reel ёки Post ҳаволасини юборинг.\n"
-        "Мен видеони ёки расмларни Telegram'га юбориб бераман. 📥"
+        "Instagram Reel ёки Post ҳаволасини юборинг.\n\n"
+        "🎥 Видео → видео қилиб\n"
+        "🖼 Расм → расм қилиб\n"
+        "📸 Карусель → ҳамма расмларни юбориб бераман."
     )
 
 
@@ -1613,100 +935,89 @@ async def start_handler(
 # MESSAGE HANDLER
 # =========================================================
 
-@dp.message()
+@dp.message(F.text)
 async def message_handler(
-    message: types.Message
+    message: Message
 ):
+
+    text = message.text.strip()
+
+    if not is_instagram_url(text):
+
+        await message.answer(
+            "❌ Instagram ҳаволасини юборинг."
+        )
+
+        return
+
+    url = clean_url(text)
+
+    status = await message.answer(
+        "⏳ Юкланяпти..."
+    )
 
     try:
 
-        text = (
-            message.text
-            or message.caption
-            or ""
-        ).strip()
-
-        print("")
-        print("========================================")
-        print("📩 NEW TELEGRAM MESSAGE")
-        print("========================================")
-        print(
-            "🔗 URL:",
-            text,
-            flush=True
-        )
-
-        if not is_instagram_url(text):
-
-            await message.answer(
-                "❌ Instagram ҳаволасини юборинг.\n\n"
-                "Масалан:\n"
-                "https://www.instagram.com/reel/ABC123/"
-            )
-
-            return
-
-        status_message = await message.answer(
-            "⏳ Юкланяпти..."
-        )
-
-        clean = clean_url(
-            text
-        )
-
         with tempfile.TemporaryDirectory() as folder:
 
-            media_files = download_media(
-                clean,
+            result = await asyncio.to_thread(
+                download_media,
+                url,
                 folder
             )
 
-            if not media_files:
+            media_type = result["type"]
+            files = result["files"]
 
-                await status_message.edit_text(
-                    "❌ Media топилмади ёки Instagram "
-                    "унга киришни чеклаган."
+            if not files:
+
+                await status.edit_text(
+                    "❌ Медиа юклаб бўлмади.\n\n"
+                    "Instagram ҳаволаси очиқ эканини "
+                    "текшириб кўринг."
                 )
 
                 return
 
-            await status_message.edit_text(
+            await status.edit_text(
                 "📤 Telegram'га юбориляпти..."
             )
 
-            await send_media_to_telegram(
+            success = await send_media(
                 message,
-                media_files
+                media_type,
+                files
             )
 
-            try:
+            if success:
 
-                await status_message.delete()
+                try:
+                    await status.delete()
+                except:
+                    pass
 
-            except Exception:
-                pass
+            else:
 
-    except Exception as error:
+                await status.edit_text(
+                    "❌ Telegram'га юборишда хатолик."
+                )
 
-        print("")
-        print("========================================")
-        print("❌ MAIN ERROR")
-        print("========================================")
+    except Exception as e:
 
         print(
-            repr(error),
-            flush=True
+            f"❌ MAIN ERROR: {e}"
         )
 
         traceback.print_exc()
 
         try:
 
-            await message.answer(
-                "❌ Хатолик юз берди. Кейинроқ қайта уриниб кўринг."
+            await status.edit_text(
+                "❌ Хатолик юз берди.\n"
+                "Бироздан кейин яна уриниб кўринг."
             )
 
-        except Exception:
+        except:
             pass
 
 
@@ -1716,52 +1027,36 @@ async def message_handler(
 
 async def main():
 
-    print("")
-    print("========================================")
     print("🤖 BOT STARTING")
-    print("========================================")
 
     check_ffmpeg()
 
-    # Render health server
-    threading.Thread(
-        target=start_server,
-        daemon=True
-    ).start()
-
-    bot = Bot(
-        token=BOT_TOKEN
-    )
+    start_health_server()
 
     try:
 
-        # Eski webhook/update'larni tozalash
         await bot.delete_webhook(
             drop_pending_updates=True
         )
 
         print(
-            "🧹 Old Telegram updates cleared",
-            flush=True
+            "🧹 Old Telegram updates cleared"
         )
+
+    except Exception as e:
 
         print(
-            "🤖 Bot ishga tushdi!",
-            flush=True
+            f"⚠️ Webhook clear error: {e}"
         )
 
-        await dp.start_polling(
-            bot
-        )
+    print(
+        "🤖 Bot ishga tushdi!"
+    )
 
-    finally:
+    await dp.start_polling(
+        bot
+    )
 
-        await bot.session.close()
-
-
-# =========================================================
-# RUN
-# =========================================================
 
 if __name__ == "__main__":
 
@@ -1774,16 +1069,13 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print(
-            "🛑 Bot stopped",
-            flush=True
+            "🛑 Bot stopped"
         )
 
-    except Exception as error:
+    except Exception as e:
 
         print(
-            "❌ Fatal error:",
-            repr(error),
-            flush=True
+            f"💥 FATAL ERROR: {e}"
         )
 
         traceback.print_exc()
