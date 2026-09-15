@@ -4,6 +4,7 @@ import os
 import re
 import tempfile
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import unquote
 
@@ -19,30 +20,38 @@ from aiogram.types import (
 )
 
 
-# ==========================================
-# BOT TOKEN
-# ==========================================
+# =========================================================
+# SETTINGS
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN topilmadi")
 
-
 dp = Dispatcher()
 
 
-# ==========================================
+# =========================================================
 # RENDER WEB SERVER
-# ==========================================
+# =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+
+        self.send_header(
+            "Content-Type",
+            "text/plain; charset=utf-8"
+        )
+
         self.end_headers()
-        self.wfile.write(b"Bot is running!")
+
+        self.wfile.write(
+            b"Instagram Telegram Bot is running!"
+        )
 
     def log_message(self, format, *args):
         pass
@@ -50,29 +59,47 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def start_server():
 
-    port = int(os.getenv("PORT", "10000"))
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000"
+        )
+    )
 
     server = HTTPServer(
-        ("0.0.0.0", port),
+        (
+            "0.0.0.0",
+            port
+        ),
         HealthHandler
     )
 
-    print(f"🌐 Web server started on port {port}")
+    print(
+        f"🌐 Render web server started on port {port}",
+        flush=True
+    )
 
     server.serve_forever()
 
 
-# ==========================================
+# =========================================================
 # INSTAGRAM URL
-# ==========================================
+# =========================================================
 
 def is_instagram_url(text):
 
     if not text:
         return False
 
+    pattern = (
+        r"https?://"
+        r"(www\.)?"
+        r"instagram\.com/"
+        r"(reel|reels|p|tv)/"
+    )
+
     return re.search(
-        r"https?://(www\.)?instagram\.com/(reel|reels|p|tv)/",
+        pattern,
         text,
         re.IGNORECASE
     )
@@ -80,123 +107,32 @@ def is_instagram_url(text):
 
 def is_reel_url(url):
 
+    pattern = (
+        r"instagram\.com/"
+        r"(reel|reels)/"
+    )
+
     return re.search(
-        r"instagram\.com/(reel|reels)/",
+        pattern,
         url,
         re.IGNORECASE
     )
 
 
-# ==========================================
-# VIDEO DOWNLOAD
-# ==========================================
-
-def download_video(url, folder):
-
-    output = os.path.join(
-        folder,
-        "video.%(ext)s"
-    )
-
-    options = {
-
-        "outtmpl": output,
-
-        "format": (
-            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
-            "best[ext=mp4]/"
-            "best"
-        ),
-
-        "merge_output_format": "mp4",
-
-        "quiet": False,
-
-        "no_warnings": False,
-
-        "noplaylist": True,
-
-        "impersonate": "chrome",
-
-        "socket_timeout": 30,
-
-        "retries": 3,
-
-        "fragment_retries": 3,
-
-        "http_headers": {
-
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/140.0.0.0 Safari/537.36"
-            ),
-
-            "Accept-Language":
-                "en-US,en;q=0.9",
-
-            "Referer":
-                "https://www.instagram.com/",
-        },
-    }
-
-    print("")
-    print("==========================================")
-    print("🎥 VIDEO DOWNLOAD")
-    print("==========================================")
-    print("🔗 URL:", url)
-    print("⚙️ yt-dlp starting...")
-
-    try:
-
-        with yt_dlp.YoutubeDL(options) as ydl:
-
-            ydl.download([url])
-
-    except Exception as error:
-
-        print("")
-        print("❌ yt-dlp ERROR")
-        print("❌ Error type:", type(error).__name__)
-        print("❌ Error:", repr(error))
-        print("")
-
-        raise
-
-    # Find downloaded video
-    files = os.listdir(folder)
-
-    print("📁 Downloaded files:", files)
-
-    for filename in files:
-
-        if filename.startswith("video."):
-
-            filepath = os.path.join(
-                folder,
-                filename
-            )
-
-            if os.path.isfile(filepath):
-
-                print("✅ Video found:", filepath)
-
-                return filepath
-
-    print("❌ Video file not found")
-
-    return None
-
-
-# ==========================================
+# =========================================================
 # URL CLEAN
-# ==========================================
+# =========================================================
 
 def clean_url(raw):
 
     try:
 
-        value = raw.replace("\\/", "/")
+        value = raw
+
+        value = value.replace(
+            "\\/",
+            "/"
+        )
 
         value = value.replace(
             "\\u0026",
@@ -213,9 +149,18 @@ def clean_url(raw):
             "%"
         )
 
-        value = html.unescape(value)
+        value = value.replace(
+            "\\u002F",
+            "/"
+        )
 
-        value = unquote(value)
+        value = html.unescape(
+            value
+        )
+
+        value = unquote(
+            value
+        )
 
         return value
 
@@ -224,24 +169,229 @@ def clean_url(raw):
         return raw
 
 
-# ==========================================
-# INSTAGRAM PAGE
-# ==========================================
+# =========================================================
+# VIDEO DOWNLOAD
+# =========================================================
 
-def get_instagram_page(url):
+def download_video(
+    url,
+    folder
+):
+
+    output = os.path.join(
+        folder,
+        "video.%(ext)s"
+    )
+
+    options = {
+
+        "outtmpl": output,
+
+        "format": (
+            "bestvideo[ext=mp4]+"
+            "bestaudio[ext=m4a]/"
+            "best[ext=mp4]/"
+            "best"
+        ),
+
+        "merge_output_format": "mp4",
+
+        "noplaylist": True,
+
+        "quiet": False,
+
+        "no_warnings": False,
+
+        "socket_timeout": 30,
+
+        "retries": 3,
+
+        "fragment_retries": 3,
+
+        "continuedl": True,
+
+        "overwrites": True,
+
+        "impersonate": "chrome",
+
+        "http_headers": {
+
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/140.0.0.0 "
+                "Safari/537.36"
+            ),
+
+            "Accept-Language":
+                "en-US,en;q=0.9",
+
+            "Referer":
+                "https://www.instagram.com/",
+        },
+    }
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "🎥 VIDEO DOWNLOAD",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "🔗 URL:",
+        url,
+        flush=True
+    )
+
+    print(
+        "⚙️ yt-dlp starting...",
+        flush=True
+    )
+
+    try:
+
+        with yt_dlp.YoutubeDL(
+            options
+        ) as ydl:
+
+            ydl.download(
+                [url]
+            )
+
+    except Exception as error:
+
+        print(
+            "",
+            flush=True
+        )
+
+        print(
+            "❌ YT-DLP ERROR",
+            flush=True
+        )
+
+        print(
+            "❌ Error type:",
+            type(error).__name__,
+            flush=True
+        )
+
+        print(
+            "❌ Error:",
+            repr(error),
+            flush=True
+        )
+
+        print(
+            "❌ Full traceback:",
+            flush=True
+        )
+
+        traceback.print_exc()
+
+        print(
+            "",
+            flush=True
+        )
+
+        raise
+
+
+    files = os.listdir(
+        folder
+    )
+
+    print(
+        "📁 Folder files:",
+        files,
+        flush=True
+    )
+
+    for filename in files:
+
+        if not filename.startswith(
+            "video."
+        ):
+            continue
+
+        filepath = os.path.join(
+            folder,
+            filename
+        )
+
+        if os.path.isfile(
+            filepath
+        ):
+
+            size = os.path.getsize(
+                filepath
+            )
+
+            print(
+                f"✅ VIDEO FOUND: {filepath}",
+                flush=True
+            )
+
+            print(
+                f"📦 File size: {size} bytes",
+                flush=True
+            )
+
+            if size > 0:
+
+                return filepath
+
+
+    print(
+        "❌ Video file not found",
+        flush=True
+    )
+
+    return None
+
+
+# =========================================================
+# INSTAGRAM PAGE
+# =========================================================
+
+def get_instagram_page(
+    url
+):
 
     headers = {
 
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/140.0.0.0 Safari/537.36"
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/140.0.0.0 "
+            "Safari/537.36"
         ),
 
         "Accept": (
-            "text/html,application/xhtml+xml,"
-            "application/xml;q=0.9,image/avif,"
-            "image/webp,*/*;q=0.8"
+            "text/html,"
+            "application/xhtml+xml,"
+            "application/xml;q=0.9,"
+            "image/avif,"
+            "image/webp,"
+            "*/*;q=0.8"
         ),
 
         "Accept-Language":
@@ -253,47 +403,87 @@ def get_instagram_page(url):
 
     session = requests.Session()
 
-    print("")
-    print("==========================================")
-    print("🌐 INSTAGRAM PAGE")
-    print("==========================================")
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "🌐 INSTAGRAM PAGE REQUEST",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "🔗 URL:",
+        url,
+        flush=True
+    )
 
     response = session.get(
+
         url,
+
         headers=headers,
+
         timeout=30,
+
         allow_redirects=True
+    )
+
+    print(
+        "📡 Status:",
+        response.status_code,
+        flush=True
+    )
+
+    print(
+        "🔗 Final URL:",
+        response.url,
+        flush=True
+    )
+
+    print(
+        "📄 HTML size:",
+        len(response.text),
+        flush=True
     )
 
     response.raise_for_status()
 
-    print(
-        "Instagram status:",
-        response.status_code
+    return (
+        response.text,
+        session,
+        headers
     )
 
-    print(
-        "Instagram URL:",
-        response.url
+
+# =========================================================
+# IMAGE DOWNLOAD
+# =========================================================
+
+def get_instagram_images(
+    url,
+    folder
+):
+
+    page, session, headers = (
+        get_instagram_page(
+            url
+        )
     )
-
-    print(
-        "HTML size:",
-        len(response.text)
-    )
-
-    return response.text, session, headers
-
-
-# ==========================================
-# IMAGE PARSER
-# ==========================================
-
-def get_instagram_images(url, folder):
-
-    page, session, headers = get_instagram_page(url)
 
     image_urls = []
+
 
     patterns = [
 
@@ -301,62 +491,96 @@ def get_instagram_images(url, folder):
 
         r'"thumbnail_src"\s*:\s*"([^"]+)"',
 
-        r'"image_versions2"\s*:\s*\{.*?"url"\s*:\s*"([^"]+)"',
+        (
+            r'"image_versions2"\s*:\s*\{'
+            r'.*?"url"\s*:\s*"([^"]+)"'
+        ),
     ]
+
 
     for pattern in patterns:
 
         matches = re.findall(
+
             pattern,
+
             page,
+
             flags=re.DOTALL
         )
 
+        print(
+            "🔎 Pattern found:",
+            len(matches),
+            flush=True
+        )
+
+
         for raw in matches:
 
-            image_url = clean_url(raw)
+            image_url = clean_url(
+                raw
+            )
 
-            if (
-                image_url.startswith("http")
-                and (
-                    "scontent" in image_url
-                    or "cdninstagram" in image_url
-                    or ".jpg" in image_url
-                    or ".jpeg" in image_url
-                    or ".png" in image_url
-                    or ".webp" in image_url
-                )
+            if not image_url.startswith(
+                "http"
             ):
+                continue
 
-                if image_url not in image_urls:
+            if not (
+                "scontent" in image_url
+                or
+                "cdninstagram" in image_url
+                or
+                ".jpg" in image_url
+                or
+                ".jpeg" in image_url
+                or
+                ".png" in image_url
+                or
+                ".webp" in image_url
+            ):
+                continue
 
-                    image_urls.append(
-                        image_url
-                    )
+            if image_url not in image_urls:
+
+                image_urls.append(
+                    image_url
+                )
+
 
     # OpenGraph image
     og_matches = re.findall(
 
-        r'<meta[^>]+property=["\']og:image["\']'
-        r'[^>]+content=["\']([^"\']+)',
+        (
+            r'<meta[^>]+'
+            r'property=["\']og:image["\']'
+            r'[^>]+'
+            r'content=["\']([^"\']+)'
+        ),
 
         page,
 
         flags=re.IGNORECASE
     )
 
+
     for raw in og_matches:
 
-        image_url = clean_url(raw)
+        image_url = clean_url(
+            raw
+        )
 
         if (
             image_url.startswith("http")
-            and image_url not in image_urls
+            and
+            image_url not in image_urls
         ):
 
             image_urls.append(
                 image_url
             )
+
 
     # Remove duplicates
     unique_urls = []
@@ -365,20 +589,31 @@ def get_instagram_images(url, folder):
 
     for image_url in image_urls:
 
-        base = image_url.split("?")[0]
+        base = image_url.split(
+            "?",
+            1
+        )[0]
 
         if base not in seen:
 
-            seen.add(base)
+            seen.add(
+                base
+            )
 
             unique_urls.append(
                 image_url
             )
 
-    print("")
-    print("📸 Found image URLs:", len(unique_urls))
+
+    print(
+        "📸 Found image URLs:",
+        len(unique_urls),
+        flush=True
+    )
+
 
     downloaded = []
+
 
     for index, image_url in enumerate(
         unique_urls,
@@ -388,10 +623,11 @@ def get_instagram_images(url, folder):
         try:
 
             print(
-                f"📥 Downloading image {index}"
+                f"📥 Image {index} downloading...",
+                flush=True
             )
 
-            image_response = session.get(
+            response = session.get(
 
                 image_url,
 
@@ -400,10 +636,10 @@ def get_instagram_images(url, folder):
                 timeout=30
             )
 
-            image_response.raise_for_status()
+            response.raise_for_status()
 
             content_type = (
-                image_response
+                response
                 .headers
                 .get(
                     "Content-Type",
@@ -412,14 +648,22 @@ def get_instagram_images(url, folder):
                 .lower()
             )
 
+            print(
+                f"📡 Image {index} type:",
+                content_type,
+                flush=True
+            )
+
+
             if "image" not in content_type:
 
                 print(
-                    f"⚠️ Image {index} skipped: "
-                    f"{content_type}"
+                    f"⚠️ Image {index} skipped",
+                    flush=True
                 )
 
                 continue
+
 
             extension = ".jpg"
 
@@ -431,6 +675,7 @@ def get_instagram_images(url, folder):
 
                 extension = ".webp"
 
+
             filename = os.path.join(
 
                 folder,
@@ -438,52 +683,75 @@ def get_instagram_images(url, folder):
                 f"image_{index}{extension}"
             )
 
+
             with open(
                 filename,
                 "wb"
             ) as file:
 
                 file.write(
-                    image_response.content
+                    response.content
                 )
 
-            downloaded.append(
-                filename
-            )
 
-            print(
-                f"✅ Image {index} saved"
-            )
+            if os.path.getsize(
+                filename
+            ) > 0:
+
+                downloaded.append(
+                    filename
+                )
+
+                print(
+                    f"✅ Image {index} saved",
+                    flush=True
+                )
+
 
         except Exception as error:
 
             print(
-                f"❌ Image {index} error:",
-                repr(error)
+                f"❌ Image {index} ERROR:",
+                repr(error),
+                flush=True
             )
+
 
     print(
         "📸 Total downloaded images:",
-        len(downloaded)
+        len(downloaded),
+        flush=True
     )
 
     return downloaded
 
 
-# ==========================================
-# MEDIA DOWNLOAD
-# ==========================================
+# =========================================================
+# DOWNLOAD MEDIA
+# =========================================================
 
-def download_media(url, folder):
+def download_media(
+    url,
+    folder
+):
 
-    # --------------------------------------
+    # =====================================
     # REEL
-    # --------------------------------------
+    # =====================================
 
-    if is_reel_url(url):
+    if is_reel_url(
+        url
+    ):
 
-        print("")
-        print("🎬 Instagram REEL detected")
+        print(
+            "",
+            flush=True
+        )
+
+        print(
+            "🎬 REEL DETECTED",
+            flush=True
+        )
 
         try:
 
@@ -498,30 +766,51 @@ def download_media(url, folder):
 
         except Exception as error:
 
-            print("")
-            print("❌ REEL VIDEO ERROR")
             print(
-                "❌ Error type:",
-                type(error).__name__
-            )
-            print(
-                "❌ Error:",
-                repr(error)
+                "",
+                flush=True
             )
 
-        # IMPORTANT:
-        # Reel does NOT fall back to image
+            print(
+                "❌ REEL VIDEO ERROR",
+                flush=True
+            )
+
+            print(
+                "❌ Error type:",
+                type(error).__name__,
+                flush=True
+            )
+
+            print(
+                "❌ Error:",
+                repr(error),
+                flush=True
+            )
+
+            traceback.print_exc()
+
+
+        # Reel uchun rasm fallback YO'Q
         return []
 
 
-    # --------------------------------------
+    # =====================================
     # POST
-    # --------------------------------------
+    # =====================================
 
-    print("")
-    print("📌 Instagram POST detected")
+    print(
+        "",
+        flush=True
+    )
 
-    # Try video first
+    print(
+        "📌 POST DETECTED",
+        flush=True
+    )
+
+
+    # First try video
     try:
 
         video = download_video(
@@ -537,11 +826,12 @@ def download_media(url, folder):
 
         print(
             "⚠️ Post video error:",
-            repr(error)
+            repr(error),
+            flush=True
         )
 
 
-    # Try images
+    # Then images
     try:
 
         images = get_instagram_images(
@@ -556,26 +846,34 @@ def download_media(url, folder):
     except Exception as error:
 
         print(
-            "❌ Image parser error:",
-            repr(error)
+            "❌ Image parser ERROR:",
+            repr(error),
+            flush=True
         )
+
+        traceback.print_exc()
 
 
     return []
 
 
-# ==========================================
+# =========================================================
 # /START
-# ==========================================
+# =========================================================
 
-@dp.message(CommandStart())
-async def start(message: types.Message):
+@dp.message(
+    CommandStart()
+)
+async def start(
+    message: types.Message
+):
 
     await message.answer(
 
         "👋 Салом!\n\n"
 
-        "Instagram Reel ёки Post ссылкасини юборинг.\n\n"
+        "Instagram Reel ёки Post "
+        "ссылкаси юборинг.\n\n"
 
         "🎥 Видео\n"
         "📸 Расм\n"
@@ -585,9 +883,9 @@ async def start(message: types.Message):
     )
 
 
-# ==========================================
-# MEDIA MESSAGE
-# ==========================================
+# =========================================================
+# MESSAGE HANDLER
+# =========================================================
 
 @dp.message()
 async def get_media(
@@ -598,13 +896,37 @@ async def get_media(
         message.text or ""
     ).strip()
 
-    print("")
-    print("==========================================")
-    print("📩 NEW MESSAGE")
-    print("==========================================")
-    print("URL:", url)
 
-    if not is_instagram_url(url):
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "📩 NEW TELEGRAM MESSAGE",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "🔗 URL:",
+        url,
+        flush=True
+    )
+
+
+    if not is_instagram_url(
+        url
+    ):
 
         await message.answer(
             "❌ Instagram ссылкаси юборинг."
@@ -612,9 +934,11 @@ async def get_media(
 
         return
 
+
     status = await message.answer(
         "⏳ Юкланяпти..."
     )
+
 
     with tempfile.TemporaryDirectory() as folder:
 
@@ -629,6 +953,18 @@ async def get_media(
                 folder
             )
 
+
+            print(
+                "📦 MEDIA FILES:",
+                media_files,
+                flush=True
+            )
+
+
+            # =================================
+            # NOTHING FOUND
+            # =================================
+
             if not media_files:
 
                 await status.edit_text(
@@ -640,14 +976,18 @@ async def get_media(
                 return
 
 
+            # =================================
+            # UPLOAD
+            # =================================
+
             await status.edit_text(
                 "📤 Telegram'га юбориляпти..."
             )
 
 
-            # --------------------------------
+            # =================================
             # ONE FILE
-            # --------------------------------
+            # =================================
 
             if len(media_files) == 1:
 
@@ -659,11 +999,14 @@ async def get_media(
                     .lower()
                 )
 
+
                 if extension in (
+
                     ".jpg",
                     ".jpeg",
                     ".png",
                     ".webp"
+
                 ):
 
                     await message.answer_photo(
@@ -683,13 +1026,14 @@ async def get_media(
                     )
 
 
-            # --------------------------------
+            # =================================
             # MULTIPLE FILES
-            # --------------------------------
+            # =================================
 
             else:
 
                 media_group = []
+
 
                 for media in media_files:
 
@@ -699,11 +1043,14 @@ async def get_media(
                         .lower()
                     )
 
+
                     if extension in (
+
                         ".jpg",
                         ".jpeg",
                         ".png",
                         ".webp"
+
                     ):
 
                         media_group.append(
@@ -729,18 +1076,24 @@ async def get_media(
                         )
 
 
-                # Telegram album limit = 10
+                # Telegram maximum = 10
                 for i in range(
+
                     0,
+
                     len(media_group),
+
                     10
+
                 ):
 
                     batch = media_group[
                         i:i + 10
                     ]
 
+
                     await message.answer_media_group(
+
                         media=batch
                     )
 
@@ -757,23 +1110,45 @@ async def get_media(
 
         except Exception as error:
 
-            print("")
-            print("==========================================")
-            print("❌ MAIN ERROR")
-            print("==========================================")
+            print(
+                "",
+                flush=True
+            )
+
+            print(
+                "========================================",
+                flush=True
+            )
+
+            print(
+                "💥 MAIN ERROR",
+                flush=True
+            )
+
+            print(
+                "========================================",
+                flush=True
+            )
+
             print(
                 "❌ Error type:",
-                type(error).__name__
+                type(error).__name__,
+                flush=True
             )
+
             print(
                 "❌ Error:",
-                repr(error)
+                repr(error),
+                flush=True
             )
+
+            traceback.print_exc()
 
 
             try:
 
                 await status.edit_text(
+
                     "❌ Юклашда хатолик бўлди."
                 )
 
@@ -782,9 +1157,9 @@ async def get_media(
                 pass
 
 
-# ==========================================
+# =========================================================
 # MAIN
-# ==========================================
+# =========================================================
 
 async def main():
 
@@ -792,41 +1167,72 @@ async def main():
         token=BOT_TOKEN
     )
 
+
     # Render web server
     threading.Thread(
+
         target=start_server,
+
         daemon=True
+
     ).start()
 
-    print("")
-    print("==========================================")
-    print("🤖 BOT STARTING")
-    print("==========================================")
 
-    # Remove old Telegram updates
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+    print(
+        "🤖 BOT STARTING",
+        flush=True
+    )
+
+    print(
+        "========================================",
+        flush=True
+    )
+
+
+    # Clear old Telegram updates
     try:
 
         await bot.delete_webhook(
+
             drop_pending_updates=True
         )
 
         print(
-            "🧹 Old Telegram updates cleared"
+            "🧹 Old Telegram updates cleared",
+            flush=True
         )
 
     except Exception as error:
 
         print(
-            "⚠️ Could not clear updates:",
-            repr(error)
+            "⚠️ Could not clear Telegram updates:",
+            repr(error),
+            flush=True
         )
 
-    print("🤖 Bot ishga tushdi!")
+
+    print(
+        "🤖 Bot ishga tushdi!",
+        flush=True
+    )
+
 
     try:
 
         await dp.start_polling(
+
             bot,
+
             handle_signals=True
         )
 
@@ -835,33 +1241,57 @@ async def main():
         await bot.session.close()
 
 
-# ==========================================
+# =========================================================
 # RUN
-# ==========================================
+# =========================================================
 
 if __name__ == "__main__":
 
     try:
 
-        asyncio.run(main())
+        asyncio.run(
+            main()
+        )
 
     except KeyboardInterrupt:
 
         print(
-            "🛑 Bot stopped"
+            "🛑 Bot stopped",
+            flush=True
         )
 
     except Exception as error:
 
-        print("")
-        print("==========================================")
-        print("💥 FATAL ERROR")
-        print("==========================================")
         print(
-            "Type:",
-            type(error).__name__
+            "",
+            flush=True
         )
+
         print(
-            "Error:",
-            repr(error)
+            "========================================",
+            flush=True
         )
+
+        print(
+            "💥 FATAL ERROR",
+            flush=True
+        )
+
+        print(
+            "========================================",
+            flush=True
+        )
+
+        print(
+            "❌ Error type:",
+            type(error).__name__,
+            flush=True
+        )
+
+        print(
+            "❌ Error:",
+            repr(error),
+            flush=True
+        )
+
+        traceback.print_exc()
