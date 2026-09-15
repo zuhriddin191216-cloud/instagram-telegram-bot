@@ -212,8 +212,6 @@ def download_video(
 
         "overwrites": True,
 
-        "impersonate": "chrome",
-
         "http_headers": {
 
             "User-Agent": (
