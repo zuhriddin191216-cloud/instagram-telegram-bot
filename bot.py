@@ -3,36 +3,34 @@ import os
 import re
 import shutil
 import tempfile
-from aiohttp import web
+import subprocess
 
-import instaloader
 import requests
+import instaloader
 import yt_dlp
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 
 # =========================
-# SETTINGS
+# CONFIG
 # =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
-
-# Render automatically provides this
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN topilmadi!")
+    raise RuntimeError("BOT_TOKEN topilmadi")
 
 if not RENDER_URL:
-    raise RuntimeError("RENDER_EXTERNAL_URL topilmadi!")
+    raise RuntimeError("RENDER_EXTERNAL_URL topilmadi")
 
 WEBHOOK_PATH = "/telegram/webhook"
 WEBHOOK_URL = RENDER_URL.rstrip("/") + WEBHOOK_PATH
-
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -42,7 +40,7 @@ dp = Dispatcher()
 # INSTAGRAM URL
 # =========================
 
-def is_instagram_url(text: str):
+def is_instagram_url(text):
     return bool(
         re.search(
             r"https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/",
@@ -58,30 +56,37 @@ def is_instagram_url(text: str):
 
 def download_video(url, folder):
 
-    output = os.path.join(folder, "video.%(ext)s")
+    output = os.path.join(
+        folder,
+        "video.%(ext)s"
+    )
 
-    options = {
+    ydl_opts = {
         "outtmpl": output,
         "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
 
-        # First try H264 because Telegram likes it
+        # Only MP4 / H264 first
         "format": (
             "bestvideo[vcodec^=avc1][ext=mp4]+"
             "bestaudio[acodec^=mp4a][ext=m4a]/"
             "best[vcodec^=avc1][ext=mp4]/"
-            "bestvideo[ext=mp4]+"
-            "bestaudio[ext=m4a]/"
-            "best[ext=mp4]/"
-            "best"
+            "best[ext=mp4]"
         ),
 
         "merge_output_format": "mp4",
+
+        # Faster
+        "quiet": True,
+        "no_warnings": True,
+
+        "retries": 2,
+        "fragment_retries": 2,
+        "socket_timeout": 20,
     }
 
     try:
-        with yt_dlp.YoutubeDL(options) as ydl:
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
 
             info = ydl.extract_info(
                 url,
@@ -99,11 +104,16 @@ def download_video(url, folder):
             return mp4
 
         for file in os.listdir(folder):
+
             if file.endswith(".mp4"):
-                return os.path.join(folder, file)
+                return os.path.join(
+                    folder,
+                    file
+                )
 
     except Exception as e:
-        print("VIDEO ERROR:", e)
+
+        print("❌ VIDEO ERROR:", e)
 
     return None
 
@@ -113,8 +123,6 @@ def download_video(url, folder):
 # =========================
 
 def get_codec(filename):
-
-    import subprocess
 
     try:
 
@@ -133,12 +141,13 @@ def get_codec(filename):
             ],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=8
         )
 
         return result.stdout.strip().lower()
 
     except Exception:
+
         return ""
 
 
@@ -148,21 +157,19 @@ def get_codec(filename):
 
 def prepare_video(filename, folder):
 
-    import subprocess
-
     if not filename:
         return None
 
     codec = get_codec(filename)
 
-    print("VIDEO CODEC:", codec)
+    print("🎥 CODEC:", codec)
 
-    # Already good
+    # H264 = Telegram friendly
     if codec == "h264":
 
         output = os.path.join(
             folder,
-            "telegram_video.mp4"
+            "telegram.mp4"
         )
 
         try:
@@ -181,26 +188,27 @@ def prepare_video(filename, folder):
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=20
+                timeout=15
             )
 
             if os.path.exists(output):
                 return output
 
         except Exception as e:
-            print("REMUX ERROR:", e)
+
+            print("⚠️ REMUX:", e)
 
         return filename
 
-    # Convert other codecs
+    # Other codecs
     output = os.path.join(
         folder,
-        "telegram_video.mp4"
+        "telegram.mp4"
     )
 
     try:
 
-        print("Converting video to H264...")
+        print("⚙️ Converting to H264...")
 
         subprocess.run(
             [
@@ -210,19 +218,19 @@ def prepare_video(filename, folder):
                 filename,
 
                 "-vf",
-                "scale=min(720\\,iw):-2",
+                "scale=min(480\\,iw):-2",
 
                 "-r",
-                "30",
+                "24",
 
                 "-c:v",
                 "libx264",
 
                 "-preset",
-                "veryfast",
+                "ultrafast",
 
                 "-crf",
-                "27",
+                "32",
 
                 "-pix_fmt",
                 "yuv420p",
@@ -231,7 +239,7 @@ def prepare_video(filename, folder):
                 "aac",
 
                 "-b:a",
-                "96k",
+                "64k",
 
                 "-movflags",
                 "+faststart",
@@ -240,7 +248,7 @@ def prepare_video(filename, folder):
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=60
+            timeout=30
         )
 
         if os.path.exists(output):
@@ -248,16 +256,17 @@ def prepare_video(filename, folder):
 
     except Exception as e:
 
-        print("CONVERT ERROR:", e)
+        print("❌ CONVERSION:", e)
 
+    # Don't send VP9 as video
     return None
 
 
 # =========================
-# INSTAGRAM IMAGE PARSER
+# IMAGE EXTRACTION
 # =========================
 
-def extract_images(url):
+def extract_image_urls(url):
 
     headers = {
         "User-Agent":
@@ -268,21 +277,16 @@ def extract_images(url):
 
     try:
 
-        response = requests.get(
+        r = requests.get(
             url,
             headers=headers,
-            timeout=20
+            timeout=15
         )
 
-        print(
-            "Instagram status:",
-            response.status_code
-        )
-
-        if response.status_code != 200:
+        if r.status_code != 200:
             return []
 
-        html = response.text
+        html = r.text
 
         urls = re.findall(
             r'https://[^"\']+\.(?:jpg|jpeg|png)[^"\']*',
@@ -292,19 +296,19 @@ def extract_images(url):
 
         result = []
 
-        for image in urls:
+        for url in urls:
 
-            image = (
-                image
+            url = (
+                url
                 .replace("\\u0026", "&")
                 .replace("\\/", "/")
             )
 
-            if image not in result:
-                result.append(image)
+            if url not in result:
+                result.append(url)
 
         print(
-            "Images found:",
+            "🖼 Images found:",
             len(result)
         )
 
@@ -312,10 +316,7 @@ def extract_images(url):
 
     except Exception as e:
 
-        print(
-            "IMAGE PARSE ERROR:",
-            e
-        )
+        print("❌ IMAGE PARSE:", e)
 
         return []
 
@@ -332,32 +333,36 @@ def download_images(urls, folder):
         "User-Agent": "Mozilla/5.0"
     }
 
-    for index, url in enumerate(urls):
+    for i, url in enumerate(urls):
 
         try:
 
-            response = requests.get(
+            r = requests.get(
                 url,
                 headers=headers,
-                timeout=20
+                timeout=15
             )
 
-            if response.status_code == 200:
+            if r.status_code == 200:
 
                 filename = os.path.join(
                     folder,
-                    f"image_{index + 1}.jpg"
+                    f"image_{i + 1}.jpg"
                 )
 
-                with open(filename, "wb") as f:
-                    f.write(response.content)
+                with open(
+                    filename,
+                    "wb"
+                ) as f:
+
+                    f.write(r.content)
 
                 files.append(filename)
 
         except Exception as e:
 
             print(
-                "IMAGE DOWNLOAD ERROR:",
+                "⚠️ IMAGE:",
                 e
             )
 
@@ -365,7 +370,7 @@ def download_images(urls, folder):
 
 
 # =========================
-# INSTALOADER FALLBACK
+# INSTALOADER
 # =========================
 
 def download_instaloader(url, folder):
@@ -383,7 +388,7 @@ def download_instaloader(url, folder):
         shortcode = match.group(1)
 
         print(
-            "Instaloader:",
+            "🔄 Instaloader:",
             shortcode
         )
 
@@ -402,41 +407,45 @@ def download_instaloader(url, folder):
 
         files = []
 
+        # =====================
         # CAROUSEL
+        # =====================
+
         if post.typename == "GraphSidecar":
 
-            for index, node in enumerate(
+            for i, node in enumerate(
                 post.get_sidecar_nodes()
             ):
 
-                # Skip videos inside carousel
+                # Ignore videos
                 if node.is_video:
                     continue
 
                 filename = os.path.join(
                     folder,
-                    f"image_{index + 1}.jpg"
+                    f"image_{i + 1}.jpg"
                 )
 
-                response = requests.get(
+                r = requests.get(
                     node.display_url,
-                    timeout=20
+                    timeout=15
                 )
 
-                if response.status_code == 200:
+                if r.status_code == 200:
 
                     with open(
                         filename,
                         "wb"
                     ) as f:
 
-                        f.write(
-                            response.content
-                        )
+                        f.write(r.content)
 
                     files.append(filename)
 
+        # =====================
         # SINGLE IMAGE
+        # =====================
+
         elif post.typename == "GraphImage":
 
             filename = os.path.join(
@@ -444,26 +453,24 @@ def download_instaloader(url, folder):
                 "image_1.jpg"
             )
 
-            response = requests.get(
+            r = requests.get(
                 post.url,
-                timeout=20
+                timeout=15
             )
 
-            if response.status_code == 200:
+            if r.status_code == 200:
 
                 with open(
                     filename,
                     "wb"
                 ) as f:
 
-                    f.write(
-                        response.content
-                    )
+                    f.write(r.content)
 
                 files.append(filename)
 
         print(
-            "Instaloader images:",
+            "📸 Instaloader:",
             len(files)
         )
 
@@ -472,7 +479,7 @@ def download_instaloader(url, folder):
     except Exception as e:
 
         print(
-            "INSTALOADER ERROR:",
+            "❌ INSTALOADER:",
             e
         )
 
@@ -480,7 +487,7 @@ def download_instaloader(url, folder):
 
 
 # =========================
-# MAIN DOWNLOAD
+# DOWNLOAD MEDIA
 # =========================
 
 def download_media(url, folder):
@@ -488,7 +495,7 @@ def download_media(url, folder):
     path = url.split("?")[0].lower()
 
     # =====================
-    # REEL / VIDEO
+    # REEL
     # =====================
 
     if "/reel/" in path or "/tv/" in path:
@@ -499,9 +506,7 @@ def download_media(url, folder):
         )
 
         if not video:
-            return {
-                "type": "error"
-            }
+            return {"type": "error"}
 
         prepared = prepare_video(
             video,
@@ -509,9 +514,7 @@ def download_media(url, folder):
         )
 
         if not prepared:
-            return {
-                "type": "error"
-            }
+            return {"type": "error"}
 
         return {
             "type": "video",
@@ -524,7 +527,7 @@ def download_media(url, folder):
 
     if "/p/" in path:
 
-        # First try video
+        # Try video
         video = download_video(
             url,
             folder
@@ -544,8 +547,8 @@ def download_media(url, folder):
                     "file": prepared
                 }
 
-        # Try images
-        images = extract_images(url)
+        # Try HTML images
+        images = extract_image_urls(url)
 
         if images:
 
@@ -600,7 +603,7 @@ async def send_video(
     except Exception as e:
 
         print(
-            "VIDEO SEND ERROR:",
+            "❌ VIDEO SEND:",
             e
         )
 
@@ -612,12 +615,7 @@ async def send_video(
 
             return True
 
-        except Exception as e2:
-
-            print(
-                "DOCUMENT ERROR:",
-                e2
-            )
+        except Exception:
 
             return False
 
@@ -633,9 +631,7 @@ async def send_album(
 
     try:
 
-        # Telegram allows max 10 media
-        # per media group.
-
+        # Telegram max 10 files per album
         for start in range(
             0,
             len(files),
@@ -667,7 +663,7 @@ async def send_album(
     except Exception as e:
 
         print(
-            "ALBUM ERROR:",
+            "❌ ALBUM ERROR:",
             e
         )
 
@@ -675,7 +671,7 @@ async def send_album(
 
 
 # =========================
-# START
+# START COMMAND
 # =========================
 
 @dp.message(CommandStart())
@@ -685,14 +681,14 @@ async def start_handler(
 
     await message.answer(
         "👋 Салом!\n\n"
-        "📸 Instagram Post\n"
-        "🎥 Instagram Reel\n\n"
-        "ҳаволасини юборинг."
+        "🎥 Instagram Reel\n"
+        "📸 Instagram Post\n\n"
+        "Ҳаволани юборинг."
     )
 
 
 # =========================
-# MESSAGE
+# MESSAGE HANDLER
 # =========================
 
 @dp.message()
@@ -704,7 +700,6 @@ async def message_handler(
         message.text or ""
     ).strip()
 
-    # Only Instagram URLs
     if not is_instagram_url(text):
 
         await message.answer(
@@ -714,57 +709,70 @@ async def message_handler(
         return
 
     status = await message.answer(
-        "⏳ Instagramдан юкланяпти..."
+        "⏳ Юкланяпти..."
     )
 
     folder = tempfile.mkdtemp(
         prefix="instagram_"
     )
 
+    status_task = None
+
     try:
 
-        # Status updates
-        async def update_status():
+        # =====================
+        # STATUS
+        # =====================
+
+        async def status_loop():
 
             messages = [
                 "⏳ Instagramдан юкланяпти...",
-                "🔎 Маълумот олиняпти...",
+                "🔎 Instagram маълумотлари олиняпти...",
                 "⚙️ Файл тайёрланяпти...",
                 "📦 Telegram учун тайёрланяпти..."
             ]
 
-            for text_status in messages:
+            for msg in messages:
 
                 await asyncio.sleep(4)
 
                 try:
 
                     await status.edit_text(
-                        text_status
+                        msg
                     )
 
                 except Exception:
                     pass
 
         status_task = asyncio.create_task(
-            update_status()
+            status_loop()
         )
 
-        # Download in separate thread
+        # =====================
+        # DOWNLOAD
+        # =====================
+
         result = await asyncio.to_thread(
             download_media,
             text,
             folder
         )
 
-        status_task.cancel()
+        if status_task:
 
-        # Error
+            status_task.cancel()
+
+        # =====================
+        # ERROR
+        # =====================
+
         if result["type"] == "error":
 
             await status.edit_text(
-                "❌ Юклаб бўлмади.\n\n"
-                "Instagram ҳаволасини текширинг."
+                "❌ Юклаб бўлмади.\n"
+                "Ҳаволани текширинг."
             )
 
             return
@@ -776,7 +784,7 @@ async def message_handler(
         if result["type"] == "video":
 
             await status.edit_text(
-                "📤 Telegram'га юбориляпти..."
+                "📤 Видео Telegram'га юбориляпти..."
             )
 
             success = await send_video(
@@ -799,6 +807,10 @@ async def message_handler(
                 result["files"]
             )
 
+        # =====================
+        # FINISH
+        # =====================
+
         if success:
 
             try:
@@ -809,13 +821,13 @@ async def message_handler(
         else:
 
             await status.edit_text(
-                "❌ Telegram'га юборишда хатолик."
+                "❌ Юборишда хатолик."
             )
 
     except Exception as e:
 
         print(
-            "HANDLER ERROR:",
+            "❌ HANDLER ERROR:",
             e
         )
 
@@ -831,17 +843,18 @@ async def message_handler(
 
     finally:
 
-        try:
-            shutil.rmtree(
-                folder,
-                ignore_errors=True
-            )
-        except Exception:
-            pass
+        if status_task:
+
+            status_task.cancel()
+
+        shutil.rmtree(
+            folder,
+            ignore_errors=True
+        )
 
 
 # =========================
-# WEB SERVER
+# HEALTH
 # =========================
 
 async def health(request):
@@ -852,21 +865,20 @@ async def health(request):
 
 
 # =========================
-# START SERVER
+# MAIN
 # =========================
 
 async def main():
 
     print("🤖 BOT STARTING")
     print(
-        "Webhook:",
+        "🌐 WEBHOOK:",
         WEBHOOK_URL
     )
 
-    # Web application
     app = web.Application()
 
-    # Health check
+    # Render health
     app.router.add_get(
         "/",
         health
@@ -889,17 +901,23 @@ async def main():
         bot=bot
     )
 
-    # Set webhook
+    # IMPORTANT:
+    # No polling!
+    # No getUpdates!
+    # No delete_webhook!
+
     await bot.set_webhook(
         WEBHOOK_URL,
         drop_pending_updates=True
     )
 
     print(
-        "✅ Telegram webhook set!"
+        "✅ WEBHOOK SET"
     )
 
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(
+        app
+    )
 
     await runner.setup()
 
@@ -912,10 +930,9 @@ async def main():
     await site.start()
 
     print(
-        f"🌐 Server started on port {PORT}"
+        f"🚀 SERVER RUNNING: {PORT}"
     )
 
-    # Keep alive
     await asyncio.Event().wait()
 
 
